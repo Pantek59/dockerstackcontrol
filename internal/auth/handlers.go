@@ -148,10 +148,26 @@ func (s *Service) Callback(rw http.ResponseWriter, r *http.Request) {
 		s.renderError(rw, r, http.StatusBadRequest, "login failed: unreadable claims")
 		return
 	}
+	// The nonce must always be checked against the ID token alone, before
+	// any claim merging.
 	if nonce, _ := stringClaim(claims, "nonce"); nonce == "" || subtle.ConstantTimeCompare([]byte(nonce), []byte(fs.Nonce)) != 1 {
 		s.Audit.Login("unknown", false, s.remoteIP(r), "nonce mismatch")
 		s.renderError(rw, r, http.StatusBadRequest, "login failed: nonce mismatch")
 		return
+	}
+	// Many providers (e.g. DocPouch) put profile claims such as the username
+	// only in the userinfo endpoint, not in the ID token. Fetch it when the
+	// discovery document advertises one and merge its claims; entries coming
+	// from userinfo take precedence.
+	if uiClaims, err := s.fetchUserinfoClaims(ctx, tok); err != nil {
+		s.Audit.Login("unknown", false, s.remoteIP(r), "userinfo fetch skipped: "+oauth2ErrCode(err))
+	} else {
+		for k, v := range uiClaims {
+			if v == nil || v == "" {
+				continue
+			}
+			claims[k] = v
+		}
 	}
 
 	username, _ := stringClaim(claims, cfg.OIDC.UsernameClaim)

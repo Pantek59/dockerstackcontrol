@@ -132,6 +132,17 @@ func (s *Service) rebuild(cfg *config.Config) error {
 	return nil
 }
 
+// userinfoEndpoint returns the provider's userinfo URL from discovery, or
+// "" when absent.
+func (s *Service) userinfoEndpoint() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.provider == nil {
+		return ""
+	}
+	return s.provider.UserInfoEndpoint()
+}
+
 func redirectURI(cfg *config.Config) string {
 	u, err := url.Parse(cfg.Server.ExternalURL)
 	if err != nil {

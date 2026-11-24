@@ -59,6 +59,14 @@ func (a *Logger) Logout(user string, success bool, remoteIP string) {
 	a.slog.Info("logout", "user", user, "success", success, "remote_ip", remoteIP)
 }
 
+// Denied records an authentication/authorization rejection that is not tied
+// to a specific stack action (e.g. CSRF or Origin failure, logout without a
+// session). Stack-endpoint denials are additionally recorded by
+// StackAction with result "denied".
+func (a *Logger) Denied(user, path, remoteIP, reason string) {
+	a.slog.Info("request_denied", "user", user, "path", path, "remote_ip", remoteIP, "reason", reason)
+}
+
 // ConfigReload records the outcome of a SIGHUP configuration reload.
 func (a *Logger) ConfigReload(success bool, path string, err error) {
 	args := []any{"success", success, "path", path}

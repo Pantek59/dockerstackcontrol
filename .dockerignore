@@ -1,0 +1,9 @@
+.git
+.gitignore
+.github
+*.md
+*.test
+coverage.*
+/bin/
+/dist/
+/dockerstackcontrol

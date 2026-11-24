@@ -1,0 +1,49 @@
+# stackctl example configuration.
+#
+# Values written as ${ENV_NAME} are expanded from the process environment on
+# load; referencing an unset variable fails startup, so no secret ends up
+# empty by accident. The file is re-read and validated when the process
+# receives SIGHUP.
+
+server:
+  listen: ":8080"
+  external_url: "https://stacks.example.com"   # used for the redirect URI and the Origin check
+  cookie_secure: true                          # false only for local development over plain http
+  session_ttl: 12h
+  session_hash_key: "${STACKCTL_HASH_KEY}"     # 32 or 64 bytes, base64 (openssl rand -base64 32)
+  session_block_key: "${STACKCTL_BLOCK_KEY}"   # exactly 32 bytes, base64 (openssl rand -base64 32)
+  command_timeout: 120s
+  # Trust X-Forwarded-For only from these direct peers (reverse proxy):
+  # trusted_proxies: ["10.0.0.0/8", "fd00::/8"]
+
+oidc:
+  issuer: "https://auth.example.com/realms/home"
+  client_id: "stackctl"
+  client_secret: "${STACKCTL_OIDC_SECRET}"
+  scopes: ["openid", "profile", "email", "groups"]
+  username_claim: "preferred_username"   # claim used as the user identity in rules and logs
+  groups_claim: "groups"                 # optional
+  # Optional: require this claim value to log in at all
+  # required_group: "stackctl-users"
+
+docker:
+  compose_binary: "docker"   # invoked as: <binary> compose -p <project> ...
+
+stacks:
+  - name: "media"              # stable ID used in URLs and rules
+    label: "Media Server"      # display name
+    project: "media"           # Compose project name (see `docker compose ls`)
+  - name: "nextcloud"
+    label: "Nextcloud"
+    project: "nextcloud"
+
+rules:
+  - subjects:
+      users: ["alice"]
+      groups: ["admins"]
+    stacks: ["*"]                         # "*" means all configured stacks
+    actions: ["start", "stop", "restart"]
+  - subjects:
+      users: ["bob"]
+    stacks: ["media"]
+    actions: ["restart"]

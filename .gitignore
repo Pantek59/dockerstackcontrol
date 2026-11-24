@@ -1,0 +1,9 @@
+# Build artifacts
+/stackctl
+/bin/
+*.test
+coverage.*
+
+# Local development files not meant for version control
+*.local.yaml
+dist/

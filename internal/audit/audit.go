@@ -35,8 +35,9 @@ func (a *Logger) StackAction(user string, groups []string, stack, project, actio
 		"remote_ip", remoteIP,
 	}
 	if groups == nil {
-		// Render consistently as [] instead of null in the JSON log line.
-		args[1] = []string{}
+		// Render consistently as [] instead of null in the JSON log line
+		// (args[3] is the groups value, args[2] its key).
+		args[3] = []string{}
 	}
 	if reason != "" {
 		args = append(args, "reason", reason)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -531,5 +532,87 @@ func TestRedirectURIMaking(t *testing.T) {
 	cfg.Server.ExternalURL = "https://example.com/stackctl/"
 	if got := redirectURI(cfg); got != "https://example.com/stackctl/auth/callback" {
 		t.Errorf("redirectURI with path = %q", got)
+	}
+}
+
+// TestProviderRebuildOnConfigReload verifies that a SIGHUP-style reload
+// rebuilds the OIDC provider, keeps sessions valid (unchanged keys) and
+// serves new logins afterwards.
+func TestProviderRebuildOnConfigReload(t *testing.T) {
+	m, err := mockoidc.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Shutdown() })
+	m.QueueUser(&mockoidc.MockUser{
+		Subject:           "alice-sub",
+		PreferredUsername: "alice",
+		Groups:            []string{"stackctl-users"},
+	})
+
+	mux := http.NewServeMux()
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	sessionKeys := `  session_hash_key: "` + base64.StdEncoding.EncodeToString(keyBytes(t, 64)) + `"
+  session_block_key: "` + base64.StdEncoding.EncodeToString(keyBytes(t, 32)) + `"`
+	writeCfg := func(rules string) {
+		raw := `server:
+  external_url: "` + srv.URL + `"
+  cookie_secure: false
+  session_ttl: 1h
+` + sessionKeys + `
+oidc:
+  issuer: "` + m.Issuer() + `"
+  client_id: "` + m.ClientID + `"
+  client_secret: "` + m.ClientSecret + `"
+  scopes: ["openid", "profile", "groups"]
+` + rules
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCfg(`stacks: []`)
+
+	holder, err := config.NewHolder(path)
+	if err != nil {
+		t.Fatalf("NewHolder: %v", err)
+	}
+	svc, err := NewService(holder, audit.New(slog.New(slog.NewJSONHandler(io.Discard, nil))))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	mux.HandleFunc("GET /login", svc.Login)
+	mux.HandleFunc("GET /auth/callback", svc.Callback)
+
+	before, err := svc.EncodeSession(Session{
+		Username: "alice", Groups: []string{"stackctl-users"}, CSRFToken: "tok",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeCfg(`stacks: []`) // same OIDC settings, changed rules content
+	if err := holder.Reload(); err != nil {
+		t.Fatalf("Reload with reachable provider error = %v", err)
+	}
+
+	// Old session still decodes (keys unchanged).
+	sess, err := svc.DecodeSession(before)
+	if err != nil {
+		t.Fatalf("pre-reload session invalidated by reload: %v", err)
+	}
+	if sess.Username != "alice" {
+		t.Errorf("username = %q", sess.Username)
+	}
+
+	// New logins still work against the rebuilt provider.
+	resp, sessionValue := loginFull(t, &harness{srv: srv, mock: m, svc: svc, cfg: holder.Get()})
+	if resp.StatusCode != http.StatusFound || sessionValue == "" {
+		t.Fatalf("login after reload: status = %d", resp.StatusCode)
 	}
 }

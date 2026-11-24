@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"slices"
 	"time"
@@ -115,7 +116,15 @@ func (s *Service) Callback(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tok, err := oauth2Cfg.Exchange(ctx, q.Get("code"), oauth2.SetAuthURLParam("code_verifier", fs.Verifier))
 	if err != nil {
-		s.Audit.Login("unknown", false, s.remoteIP(r), "token exchange failed")
+		// Log the machine-readable error code only: some providers echo the
+		// submitted secret (or other sensitive text) inside the human-readable
+		// description, which must never reach the logs.
+		detail := "token exchange failed"
+		var oer *oauth2.RetrieveError
+		if errors.As(err, &oer) && oer.ErrorCode != "" {
+			detail += " (provider error: " + oer.ErrorCode + ")"
+		}
+		s.Audit.Login("unknown", false, s.remoteIP(r), detail)
 		s.renderError(rw, r, http.StatusBadRequest, "login failed: token exchange failed")
 		return
 	}

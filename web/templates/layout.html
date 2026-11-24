@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stack Control</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-csrf-token="{{.CSRFToken}}">
+  <header class="topbar">
+    <a class="brand" href="/">Stack Control</a>
+    <div class="user">
+      {{if .Username}}
+      <span class="username">{{.Username}}</span>
+      <form method="post" action="/logout" class="logout-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="btn-link">Log out</button>
+      </form>
+      {{end}}
+    </div>
+  </header>
+  <main>
+    <div id="banner" class="banner" role="alert" hidden></div>
+    {{template "content" .}}
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

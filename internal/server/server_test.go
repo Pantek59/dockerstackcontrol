@@ -154,7 +154,10 @@ func newHarness(t *testing.T, mutate func(*config.Config)) *harness {
 	if err != nil {
 		t.Fatalf("NewSessionService: %v", err)
 	}
-	s := New(holder, runner, svc, aud, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	s, err := New(holder, runner, svc, aud, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
 	return &harness{handler: s.Handler(), runner: runner, svc: svc}
 }
 
@@ -518,6 +521,67 @@ func TestConcurrentActionReturnsConflict(t *testing.T) {
 	}
 	if calls := h.runner.callsWith("do:media/restart"); len(calls) != 1 {
 		t.Errorf("do calls = %d, want exactly one executed", len(calls))
+	}
+}
+
+func TestDashboardRenders(t *testing.T) {
+	h := newHarness(t, nil)
+	cookie, csrf := h.sessionFor(t, "bob", []string{"family"})
+	rec := h.do(withSession(get(t, base+"/"), cookie, csrf, ""))
+	requireStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Stack Control",
+		"data-csrf-token=\"" + csrf + "\"",
+		"bob",
+		`action="/logout"`,
+		"csrf_token",
+		"/static/app.js",
+		"/static/style.css",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard missing %q", want)
+		}
+	}
+	// The CSRF token must appear inside the logout form hidden input too.
+	if !strings.Contains(body, `value="`+csrf+`"`) {
+		t.Error("logout form must carry the CSRF token")
+	}
+}
+
+func TestErrorPageForUnknownPath(t *testing.T) {
+	h := newHarness(t, nil)
+	rec := h.do(get(t, base+"/nope"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "404") || !strings.Contains(rec.Body.String(), "Stack Control") {
+		t.Error("404 must render the HTML error page")
+	}
+}
+
+func TestStaticAssetsServed(t *testing.T) {
+	h := newHarness(t, nil)
+	for _, c := range []struct {
+		path        string
+		contentType string
+		mustContain string
+	}{
+		{"/static/app.js", "text/javascript", "api/stacks"},
+		{"/static/style.css", "text/css", "prefers-color-scheme"},
+		{"/static/favicon.svg", "image/svg+xml", "</svg>"},
+	} {
+		rec := h.do(get(t, base+c.path))
+		requireStatus(t, rec, http.StatusOK)
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, c.contentType) {
+			t.Errorf("%s content-type = %q, want prefix %q", c.path, ct, c.contentType)
+		}
+		if !strings.Contains(rec.Body.String(), c.mustContain) {
+			t.Errorf("%s does not contain %q", c.path, c.mustContain)
+		}
+	}
+	if rec := h.do(get(t, base+"/static/nope.css")); rec.Code != http.StatusNotFound {
+		t.Errorf("missing asset status = %d, want 404", rec.Code)
 	}
 }
 

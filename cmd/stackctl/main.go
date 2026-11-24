@@ -65,7 +65,10 @@ func run(logger *slog.Logger) error {
 	}
 
 	runner := docker.NewExecRunner(cfg.Docker.ComposeBinary, cfg.Server.CommandTimeout.Std())
-	srv := server.New(holder, runner, svc, aud, logger)
+	srv, err := server.New(holder, runner, svc, aud, logger)
+	if err != nil {
+		return err
+	}
 
 	httpServer := &http.Server{
 		Addr: cfg.Server.Listen,

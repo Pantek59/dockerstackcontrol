@@ -21,17 +21,18 @@ func writeJSONError(rw http.ResponseWriter, status int, msg string) {
 	_, _ = fmt.Fprintf(rw, `{"error":%q}`, msg)
 }
 
-// dashboard is the authenticated start page. With the API the GUI is fed by
-// JSON; the actual markup lives in the embedded templates.
+// dashboard renders the authenticated start page; the stack list is filled
+// in by app.js from the JSON API.
 func (s *Server) dashboard(rw http.ResponseWriter, r *http.Request) {
 	user, ok := auth.UserFrom(r.Context())
 	if !ok {
 		http.Error(rw, "authentication required", http.StatusUnauthorized)
 		return
 	}
-	// TODO(M6): render the embedded layout/dashboard templates.
-	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(rw, "<!doctype html><html><body><h1>Stack Control</h1><p>Signed in as %s.</p></body></html>", user.Username)
+	s.renderPage(rw, "dashboard.html", PageData{
+		Username:  user.Username,
+		CSRFToken: user.CSRFToken,
+	}, http.StatusOK)
 }
 
 // stackJSON is one entry of GET /api/stacks.

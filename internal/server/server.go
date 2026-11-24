@@ -8,6 +8,7 @@
 package server
 
 import (
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -23,40 +24,50 @@ import (
 
 // Server is the fully wired application HTTP handler.
 type Server struct {
-	holder   *config.Holder
-	runner   docker.Runner
-	auth     *auth.Service
-	audit    *audit.Logger
-	logger   *slog.Logger
-	staticFS http.Handler // optional embedded static assets (web package)
+	holder    *config.Holder
+	runner    docker.Runner
+	auth      *auth.Service
+	audit     *audit.Logger
+	logger    *slog.Logger
+	staticFS  http.Handler
+	templates map[string]*template.Template
 
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex
 }
 
-// SetStaticFS optionally installs a handler for /static/ (embedded web
-// assets). When unset, the routes exist and answer 404.
-func (s *Server) SetStaticFS(h http.Handler) { s.staticFS = h }
-
-// New wires the pieces together. logger receives request logs.
-func New(holder *config.Holder, runner docker.Runner, svc *auth.Service, aud *audit.Logger, logger *slog.Logger) *Server {
+// New wires the pieces together. logger receives request logs. An error is
+// returned when the embedded templates cannot be parsed (a build-time asset,
+// so this should never happen in practice).
+func New(holder *config.Holder, runner docker.Runner, svc *auth.Service, aud *audit.Logger, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	templates, err := parseTemplates()
+	if err != nil {
+		return nil, err
+	}
+	static, err := staticHandler()
+	if err != nil {
+		return nil, err
+	}
 	s := &Server{
-		holder: holder,
-		runner: runner,
-		auth:   svc,
-		audit:  aud,
-		logger: logger,
-		locks:  make(map[string]*sync.Mutex),
+		holder:    holder,
+		runner:    runner,
+		auth:      svc,
+		audit:     aud,
+		logger:    logger,
+		templates: templates,
+		staticFS:  static,
+		locks:     make(map[string]*sync.Mutex),
 	}
 
 	// Inject the trusted-proxy aware client address computation into the
-	// auth service so its audit lines carry the same remote_ip semantics.
+	// auth service so its audit lines carry the same remote_ip semantics,
+	// and render HTML error pages from the embedded templates.
 	svc.RemoteIP = func(r *http.Request) string { return RemoteIP(holder.Get(), r) }
-
-	return s
+	svc.RenderError = s.renderErrorPage
+	return s, nil
 }
 
 // lockFor returns the per-stack mutex used to serialize actions.
@@ -90,7 +101,7 @@ func (s *Server) registerRoutes() http.Handler {
 	mux.Handle("POST /api/stacks/{name}/{action}", s.auth.RequireSession(true,
 		s.auth.RequireCSRF(true, http.HandlerFunc(s.apiAction))))
 
-	mux.HandleFunc("GET /static/", s.notFoundForStatic)
+	mux.Handle("GET /static/", s.staticFS)
 
 	mux.HandleFunc("/", s.notFound)
 	return mux
@@ -121,20 +132,10 @@ func (s *Server) notFound(rw http.ResponseWriter, r *http.Request) {
 		writeJSONError(rw, http.StatusNotFound, "not found")
 		return
 	}
-	http.Error(rw, "not found", http.StatusNotFound)
+	s.renderErrorPage(rw, r, http.StatusNotFound, "page not found")
 }
 
 func isAPIPath(p string) bool { return strings.HasPrefix(p, "/api/") }
-
-// notFoundForStatic answers requests for static assets; when the embedded
-// web assets are installed they are served instead.
-func (s *Server) notFoundForStatic(rw http.ResponseWriter, r *http.Request) {
-	if s.staticFS != nil {
-		s.staticFS.ServeHTTP(rw, r)
-		return
-	}
-	http.Error(rw, "not found", http.StatusNotFound)
-}
 
 // withSecurityHeaders applies the strict default headers to every response.
 func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
@@ -159,7 +160,7 @@ func (s *Server) withRecovery(next http.Handler) http.Handler {
 				if isAPIPath(r.URL.Path) {
 					writeJSONError(rw, http.StatusInternalServerError, "internal error")
 				} else {
-					http.Error(rw, "internal error", http.StatusInternalServerError)
+					s.renderErrorPage(rw, r, http.StatusInternalServerError, "internal error")
 				}
 			}
 		}()

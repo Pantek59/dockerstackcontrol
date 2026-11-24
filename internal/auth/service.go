@@ -10,6 +10,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"path"
@@ -119,13 +120,7 @@ func (s *Service) rebuild(cfg *config.Config) error {
 		Scopes:       cfg.OIDC.Scopes,
 	}
 
-	sessionCodec := securecookie.New(cfg.Server.HashKey, cfg.Server.BlockKey)
-	sessionCodec.SetSerializer(securecookie.JSONEncoder{})
-	sessionCodec.MaxAge(int(cfg.Server.SessionTTL.Std().Seconds()))
-
-	flowCodec := securecookie.New(cfg.Server.HashKey, cfg.Server.BlockKey)
-	flowCodec.SetSerializer(securecookie.JSONEncoder{})
-	flowCodec.MaxAge(int(FlowCookieTTL.Seconds()))
+	sessionCodec, flowCodec := newCodecs(cfg)
 
 	s.mu.Lock()
 	s.provider = provider
@@ -145,6 +140,37 @@ func redirectURI(cfg *config.Config) string {
 	u.Path = path.Join(u.Path, "auth", "callback")
 	u.RawQuery, u.Fragment = "", ""
 	return u.String()
+}
+
+// newCodecs builds the session and flow cookie codecs from cfg.
+func newCodecs(cfg *config.Config) (session, flow *securecookie.SecureCookie) {
+	session = securecookie.New(cfg.Server.HashKey, cfg.Server.BlockKey)
+	session.SetSerializer(securecookie.JSONEncoder{})
+	session.MaxAge(int(cfg.Server.SessionTTL.Std().Seconds()))
+
+	flow = securecookie.New(cfg.Server.HashKey, cfg.Server.BlockKey)
+	flow.SetSerializer(securecookie.JSONEncoder{})
+	flow.MaxAge(int(FlowCookieTTL.Seconds()))
+	return session, flow
+}
+
+// NewSessionService builds a Service without OIDC discovery: only the session
+// cookie and CSRF functionality is wired (session codecs from cfg). Login and
+// Callback require the full NewService. Intended for tests of consumers of the
+// session middleware (e.g. the server package) that do not exercise the login
+// flow.
+func NewSessionService(holder *config.Holder, aud *audit.Logger) (*Service, error) {
+	cfg := holder.Get()
+	if cfg.Server.HashKey == nil || cfg.Server.BlockKey == nil {
+		return nil, errors.New("auth: session keys are not decoded; run config.Validate first")
+	}
+	s := &Service{Holder: holder, Audit: aud}
+	session, flow := newCodecs(cfg)
+	s.mu.Lock()
+	s.session = session
+	s.flow = flow
+	s.mu.Unlock()
+	return s, nil
 }
 
 func (s *Service) snapshot() (oauth2Cfg *oauth2.Config, verifier *oidc.IDTokenVerifier, session, flow *securecookie.SecureCookie) {

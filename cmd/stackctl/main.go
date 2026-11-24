@@ -4,14 +4,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Pantek59/dockerstackcontrol/internal/audit"
+	"github.com/Pantek59/dockerstackcontrol/internal/auth"
 	"github.com/Pantek59/dockerstackcontrol/internal/config"
+	"github.com/Pantek59/dockerstackcontrol/internal/docker"
+	"github.com/Pantek59/dockerstackcontrol/internal/server"
 )
 
 // configFlag overrides the STACKCTL_CONFIG environment variable, which itself
@@ -33,13 +39,14 @@ func main() {
 func run(logger *slog.Logger) error {
 	path := configPath()
 
+	// Fail fast on an invalid configuration before binding anything.
 	holder, err := config.NewHolder(path)
 	if err != nil {
 		return err
 	}
 	cfg := holder.Get()
-
 	aud := audit.New(logger)
+
 	logger.Info("configuration loaded",
 		"path", path,
 		"listen", cfg.Server.Listen,
@@ -48,22 +55,66 @@ func run(logger *slog.Logger) error {
 		"oidc_issuer", cfg.OIDC.Issuer,
 		"cookie_secure", cfg.Server.CookieSecure,
 		"session_ttl", cfg.Server.SessionTTL.Std().String(),
+		"command_timeout", cfg.Server.CommandTimeout.Std().String(),
 	)
+
+	// OIDC discovery happens here: an unreachable provider aborts startup.
+	svc, err := auth.NewService(holder, aud)
+	if err != nil {
+		return err
+	}
+
+	runner := docker.NewExecRunner(cfg.Docker.ComposeBinary, cfg.Server.CommandTimeout.Std())
+	srv := server.New(holder, runner, svc, aud, logger)
+
+	httpServer := &http.Server{
+		Addr: cfg.Server.Listen,
+		// Write timeout must exceed the longest Docker command timeout, or
+		// the response of a slow restart would be cut off.
+		WriteTimeout:      cfg.Server.CommandTimeout.Std() + 30*time.Second,
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		Handler:           srv.Handler(),
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
 
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Info("listening", "addr", cfg.Server.Listen, "external_url", cfg.Server.ExternalURL)
+		errCh <- httpServer.ListenAndServe()
+	}()
+
 	for {
 		select {
+		case err := <-errCh:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
 		case <-ctx.Done():
 			logger.Info("shutting down")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := httpServer.Shutdown(shutdownCtx); err != nil {
+				logger.Warn("graceful shutdown incomplete", "err", err)
+			}
 			return nil
 		case <-hup:
 			logger.Info("SIGHUP received, reloading configuration")
-			err := holder.Reload()
-			aud.ConfigReload(err == nil, path, err)
+			if err := holder.Reload(); err != nil {
+				aud.ConfigReload(false, path, err)
+			} else {
+				aud.ConfigReload(true, path, nil)
+			}
+			// Reload errors never stop the process: the previous config keeps
+			// serving and sessions stay valid.
 		}
 	}
 }
@@ -78,5 +129,3 @@ func configPath() string {
 	}
 	return path
 }
-
-var hup = make(chan os.Signal, 1)

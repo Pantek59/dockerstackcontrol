@@ -33,12 +33,12 @@ func TestProjectNameGuard(t *testing.T) {
 		"ä", "media\r\nfoo", "-x", string([]byte{0}),
 	}
 	ctx := context.Background()
-	r := NewExecRunner("/bin/true", time.Second)
+	r := NewExecRunner("/bin/true", time.Second, 0)
 	for _, p := range hostile {
 		if _, err := r.Status(ctx, p); err == nil {
 			t.Errorf("Status(%q) accepted invalid project name", p)
 		}
-		if err := r.Do(ctx, p, ActionRestart); err == nil {
+		if err := r.Do(ctx, StackSpec{Project: p}, ActionRestart); err == nil {
 			t.Errorf("Do(%q) accepted invalid project name", p)
 		}
 	}
@@ -287,7 +287,7 @@ func TestExecRunnerCommandError(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &ExecRunner{bin: script, env: minimalEnv(), timeout: time.Second}
-	err := r.Do(context.Background(), "stackctl-unknown", ActionStop)
+	err := r.Do(context.Background(), StackSpec{Project: "stackctl-unknown"}, ActionStop)
 	if err == nil {
 		t.Fatal("Do() succeeded")
 	}
@@ -315,7 +315,7 @@ func TestExecRunnerTimeout(t *testing.T) {
 	}
 	r := &ExecRunner{bin: script, env: minimalEnv(), timeout: 150 * time.Millisecond}
 	start := time.Now()
-	err := r.Do(context.Background(), "slow", ActionStart)
+	err := r.Do(context.Background(), StackSpec{Project: "slow"}, ActionStart)
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("Do() error = %v, want ErrTimeout", err)
 	}
@@ -326,7 +326,127 @@ func TestExecRunnerTimeout(t *testing.T) {
 
 func TestExecRunnerInvalidAction(t *testing.T) {
 	r := &ExecRunner{bin: "/bin/false", env: minimalEnv(), timeout: time.Second}
-	if err := r.Do(context.Background(), "media", Action("format")); err == nil {
+	if err := r.Do(context.Background(), StackSpec{Project: "media"}, Action("format")); err == nil {
 		t.Error("Do() accepted unknown action")
+	}
+}
+
+// argsRecordingCompose is a fake compose binary that appends its joined
+// argument list (space-separated) to one line per invocation.
+func argsRecordingCompose(t *testing.T) (script, argsLog string) {
+	t.Helper()
+	script = filepath.Join(t.TempDir(), "arg-docker")
+	argsLog = filepath.Join(t.TempDir(), "args")
+	content := "#!/bin/sh\nprintf '%s\\n' \"CMD: $*\" >> \"" + argsLog + "\"\nexit 0\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script, argsLog
+}
+
+func TestFileBackedActionArgBuilders(t *testing.T) {
+	got := composeFileActionArgs("media", "/stacks/media/docker-compose.yml", ActionPull)
+	want := []string{"compose", "-p", "media", "-f", "/stacks/media/docker-compose.yml", "pull"}
+	if strings.Join(got, "\x1f") != strings.Join(want, "\x1f") {
+		t.Errorf("pull args = %v, want %v", got, want)
+	}
+	got = composeFileActionArgs("nextcloud", "/srv/nextcloud/compose.yaml", ActionUp)
+	want = []string{"compose", "-p", "nextcloud", "-f", "/srv/nextcloud/compose.yaml", "up", "-d"}
+	if strings.Join(got, "\x1f") != strings.Join(want, "\x1f") {
+		t.Errorf("up args = %v, want %v", got, want)
+	}
+	got = composeConfigArgs("media", "/stacks/media/docker-compose.yml")
+	want = []string{"compose", "-p", "media", "-f", "/stacks/media/docker-compose.yml", "config", "--quiet"}
+	if strings.Join(got, "\x1f") != strings.Join(want, "\x1f") {
+		t.Errorf("config args = %v, want %v", got, want)
+	}
+}
+
+func TestDoFileBackedActionsBuildCorrectCommand(t *testing.T) {
+	script, argsLog := argsRecordingCompose(t)
+	r := &ExecRunner{bin: script, env: minimalEnv(), timeout: time.Second, pullTimeout: time.Second}
+
+	stackDir := t.TempDir()
+	compose := filepath.Join(stackDir, "docker-compose.yml")
+	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := StackSpec{Project: "media", Dir: stackDir, Compose: "docker-compose.yml"}
+
+	if err := r.Do(context.Background(), spec, ActionPull); err != nil {
+		t.Fatalf("Do(pull) error = %v", err)
+	}
+	if err := r.Do(context.Background(), spec, ActionUp); err != nil {
+		t.Fatalf("Do(up) error = %v", err)
+	}
+	if err := r.Validate(context.Background(), spec); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if line != "" {
+			lines = append(lines, strings.TrimPrefix(line, "CMD: "))
+		}
+	}
+	wants := []string{
+		"compose -p media -f " + compose + " pull",
+		"compose -p media -f " + compose + " up -d",
+		"compose -p media -f " + compose + " config --quiet",
+	}
+	if len(lines) != len(wants) {
+		t.Fatalf("recorded commands = %v", lines)
+	}
+	for i, want := range wants {
+		if lines[i] != want {
+			t.Errorf("command %d = %q, want %q", i, lines[i], want)
+		}
+	}
+}
+
+func TestDoFileBackedActionsRequireFileAndCleanDir(t *testing.T) {
+	r := &ExecRunner{bin: "/bin/false", env: minimalEnv(), timeout: time.Second}
+	// No compose file name: refuse before exec.
+	if err := r.Do(context.Background(), StackSpec{Project: "media", Dir: "/stacks"}, ActionPull); err == nil {
+		t.Error("Do(pull) without compose file accepted")
+	}
+	// No dir at all.
+	if err := r.Do(context.Background(), StackSpec{Project: "media"}, ActionUp); err == nil {
+		t.Error("Do(up) without dir accepted")
+	}
+	// Relative dir.
+	if err := r.Do(context.Background(), StackSpec{Project: "media", Dir: "relative", Compose: "x.yml"}, ActionPull); err == nil {
+		t.Error("Do(pull) with relative dir accepted")
+	}
+	// Filenames with path segments must never reach the CLI.
+	if err := r.Do(context.Background(), StackSpec{Project: "media", Dir: "/x", Compose: "../escape.yml"}, ActionPull); err == nil {
+		t.Error("Do(pull) with traversing file name accepted")
+	}
+	// Label-based actions must not be affected by the file requirement.
+	if err := r.Do(context.Background(), StackSpec{Project: "media"}, ActionRestart); err == nil {
+		_ = err // /bin/false exits 1, so a CommandError is expected, not a guard error
+	}
+}
+
+func TestPullUsesPullTimeout(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "slow-docker")
+	content := "#!/bin/sh\nsleep 5\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// timeout must be long enough to not fire; pullTimeout must be honoured
+	// for pull and ignored for the label-based restart.
+	r := &ExecRunner{bin: script, env: minimalEnv(), timeout: 2 * time.Second, pullTimeout: 80 * time.Millisecond}
+	start := time.Now()
+	err := r.Do(context.Background(), StackSpec{Project: "slow", Dir: "/x", Compose: "y.yml"}, ActionPull)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Do(pull) error = %v, want ErrTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("pull took %v: pullTimeout was not honoured", elapsed)
 	}
 }

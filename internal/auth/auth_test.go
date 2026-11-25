@@ -55,7 +55,10 @@ func newHarness(t *testing.T, mutate func(c *config.Config)) *harness {
 			UsernameClaim: "preferred_username",
 			GroupsClaim:   "groups",
 		},
-		Docker: config.Docker{ComposeBinary: "docker"},
+		Docker: config.Docker{
+			ComposeBinary: "docker",
+			PullTimeout:   config.Duration(30 * time.Second),
+		},
 	}
 	if mutate != nil {
 		mutate(cfg)

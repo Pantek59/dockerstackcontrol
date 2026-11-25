@@ -134,6 +134,11 @@
       }
       b.dataset.action = action;
       b.addEventListener("click", function () {
+        if (action === "edit") {
+          // The editor is a page, not a compose action.
+          window.location.href = "/stacks/" + encodeURIComponent(stack.name) + "/edit";
+          return;
+        }
         runAction(stack.name, action);
       });
       actions.appendChild(b);

@@ -185,6 +185,14 @@ stacks:
 		{"bad trusted proxy", strings.Replace(base, `external_url: "https://stacks.example.com"`, "external_url: \"https://stacks.example.com\"\n  trusted_proxies: [\"nope\"]", 1), "trusted_proxies"},
 		{"unknown config key", strings.Replace(base, `external_url: "https://stacks.example.com"`, "external_url: \"https://stacks.example.com\"\n  unknown_server_key: true", 1), "not found in type"},
 		{"unknown stack key typo", strings.Replace(base, `project: "media"`, "projekt: \"media\"", 1), "not found in type"},
+		{"relative stack dir", strings.Replace(base, `project: "media"`, "project: \"media\"\n    dir: \"stacks/media\"", 1), "clean absolute path"},
+		{"stack dir with dot traversal", strings.Replace(base, `project: "media"`, "project: \"media\"\n    dir: \"/stacks/../media\"", 1), "clean absolute path"},
+		{"stack dir with backslash", strings.Replace(base, `project: "media"`, "project: \"media\"\n    dir: \"/stacks\\\\media\"", 1), "path separator"},
+		{"compose_file without dir", strings.Replace(base, `project: "media"`, "project: \"media\"\n    compose_file: \"stack.yml\"", 1), "requires"},
+		{"compose_file with path", strings.Replace(base, `project: "media"`, "project: \"media\"\n    dir: \"/s\"\n    compose_file: \"sub/stack.yml\"", 1), "plain file name"},
+		{"compose_file dot name", strings.Replace(base, `project: "media"`, "project: \"media\"\n    dir: \"/s\"\n    compose_file: \"..hidden\"", 1), "plain file name"},
+		{"zero pull timeout", base + "\ndocker:\n  pull_timeout: 0s\n", "pull_timeout"},
+		{"negative pull timeout", base + "\ndocker:\n  pull_timeout: -3m\n", "pull_timeout"},
 	}
 	return variants
 }
@@ -231,6 +239,58 @@ oidc:
 	_, err := Parse(raw)
 	if err == nil || !strings.Contains(err.Error(), "client_secret") {
 		t.Errorf("Parse() error = %v, want client_secret required failure", err)
+	}
+}
+
+func TestParseStackDirAndFileSettings(t *testing.T) {
+	t.Setenv("STACKCTL_OIDC_SECRET", "s3cr3t")
+	raw := strings.NewReplacer("{{HASH64}}", testHashKey64, "{{BLOCK32}}", testBlockKey32,
+		`project: "media"`, "project: \"media\"\n    dir: \"/srv/stacks/media\"",
+		`project: "nextcloud"`, "project: \"nextcloud\"\n    dir: \"/srv/stacks/nextcloud\"\n    compose_file: \"compose.yaml\"",
+	).Replace(validConfig)
+
+	c, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if c.Stacks[0].Dir != "/srv/stacks/media" || c.Stacks[0].ComposeFile != "" {
+		t.Errorf("media stack = %+v", c.Stacks[0])
+	}
+	if c.Stacks[1].Dir != "/srv/stacks/nextcloud" || c.Stacks[1].ComposeFile != "compose.yaml" {
+		t.Errorf("nextcloud stack = %+v", c.Stacks[1])
+	}
+	if c.Docker.PullTimeout.Std() != DefaultPullTimeout {
+		t.Errorf("PullTimeout = %v, want default %v", c.Docker.PullTimeout.Std(), DefaultPullTimeout)
+	}
+
+	// New action names are accepted in rules.
+	cfg := strings.NewReplacer(
+		`actions: ["start", "stop", "restart"]`,
+		`actions: ["start", "stop", "restart", "pull", "up", "edit"]`,
+	).Replace(raw)
+	if _, err := Parse([]byte(cfg)); err != nil {
+		t.Fatalf("Parse(new actions) error = %v", err)
+	}
+}
+
+func TestActionHelpers(t *testing.T) {
+	for _, a := range CanonicalActions {
+		if !ValidAction(a) {
+			t.Errorf("ValidAction(%q) = false", a)
+		}
+	}
+	if len(CanonicalActions) != 6 {
+		t.Errorf("CanonicalActions = %v, want 6 entries", CanonicalActions)
+	}
+	for _, a := range []string{"pull", "up", "edit"} {
+		if !ActionRequiresFiles(a) {
+			t.Errorf("ActionRequiresFiles(%q) = false", a)
+		}
+	}
+	for _, a := range []string{"start", "stop", "restart", "format", ""} {
+		if ActionRequiresFiles(a) {
+			t.Errorf("ActionRequiresFiles(%q) = true", a)
+		}
 	}
 }
 

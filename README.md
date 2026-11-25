@@ -29,6 +29,14 @@ stylesheet.
 > secrets never logged), but deploying it means giving its container that
 > socket access. Only expose it behind TLS, keep the container isolated, and
 > treat anyone with `group add`/exec rights on the host as effectively root.
+>
+> The same holds, and then some, for the `edit` permission: whoever may edit
+> a stack's `docker-compose.yml` decides what containers with what mounts,
+> resources and images the next `up` creates — an arbitrary compose file
+> plus Docker socket access is effectively root configuration. Grant `edit`
+> deliberately, to administrators. Every file read (including `.env`, which
+> usually holds secrets) and every save is authorized, audited, backed up
+> and validated before it is written.
 
 ## Features
 
@@ -37,15 +45,18 @@ stylesheet.
 - Stateless encrypted session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`,
   bounded lifetime); no server-side session store.
 - Dashboard listing visible stacks with live status and per-action buttons;
-  actions: `start`, `stop`, `restart` on a whole Compose project.
+  actions: `start`, `stop`, `restart` on a whole Compose project, plus — for
+  stacks that declare a `dir` — `pull` (fetch newer images) and `up`
+  (recreate from the compose model) and a file editor for the stack's
+  `docker-compose.yml` and `.env`.
 - Server-side authorization on every request (the UI is a convenience, never
   the enforcement point), CSRF token + `Origin` check on every state change.
-- Structured JSON audit log (`log/slog`) of every action attempt, login,
-  logout, denial and config reload.
+- Structured JSON audit log (`log/slog`) of every action attempt, file
+  read/save, login, logout, denial and config reload.
 - Hot reload of permissions via `SIGHUP`; sessions stay valid.
-- Deliberately **not** included: creating/editing/deleting stacks, volumes or
-  networks, log viewing, shells, multi-host support, local user accounts, a
-  database.
+- Deliberately **not** included: creating/deleting stacks, volumes or
+  networks, compose override files (only the main model is editable), log
+  viewing, shells, multi-host support, local user accounts, a database.
 
 ## Configuration
 
@@ -75,6 +86,10 @@ match (username equals an entry in `users`, or any of the user's groups equals
 an entry in `groups`). A stack is visible if the user has at least one action
 on it; only the allowed buttons are rendered. With no rules a user can log in
 and sees an empty list.
+
+Actions: `start`, `stop`, `restart` need no compose files; `pull`, `up` and
+`edit` need the stack to declare `stacks[].dir` (see below) and are hidden
+from users when it is missing.
 
 On `SIGHUP` the file is re-read and validated; on success the new rules apply
 to the next request without restarting or invalidating sessions (as long as
@@ -148,11 +163,71 @@ docker compose kill -s HUP stackctl
 ### Compose version
 
 stackctl invokes the compose CLI as
-`<compose_binary> compose -p <project> ps|start|stop|restart`. This project
-addressing without a compose file was verified with **Compose v5.8.0**
-(bundle that ships with the `docker:cli` image). Status output parsers accept
-both the line-delimited JSON objects used by older releases and the single
-JSON array form, so both Compose output styles work.
+`<compose_binary> compose -p <project> ps|start|stop|restart` and — for
+stacks with a configured directory —
+`<compose_binary> compose -p <project> -f <dir>/<file> pull|up -d|config`.
+This project addressing without a compose file was verified with **Compose
+v5.8.0** (bundle that ships with the `docker:cli` image). Status output
+parsers accept both the line-delimited JSON objects used by older releases
+and the single JSON array form, so both Compose output styles work. `pull`
+and `up` require the compose file (label-based address alone is not enough);
+they were verified to resolve `.env` from the file's directory, matching
+host-side behavior.
+
+## Pull, up and editing stack files
+
+Three actions exist besides `start`/`stop`/`restart`. All of them are bound
+to `stacks[].dir` and are only offered/accepted when a stack declares one:
+
+- **pull** — `docker compose -p <project> -f <file> pull`: fetches newer
+  images for the services in the model. Running containers stay on the old
+  image until an `up`.
+- **up** — `docker compose -p <project> -f <file> up -d`: recreates
+  containers from the model on disk, applying image, compose and `.env`
+  changes. This is the counterpart of `pull` — and of every edit.
+- **edit** — permission for the editor page (`GET /stacks/<stack>/edit`) and
+  its file API: read and replace the main compose file and `.env`
+
+  - saves are guarded by the sha256 of the version the editor last saw
+    (concurrent changes fail with a conflict instead of silently winning),
+  - the previous content is backed up to `<dir>/.stackctl-backups/`
+    (timestamped, last 10 kept) before it is replaced,
+  - the write itself is atomic (temp file + rename) and preserves the
+    file's mode (new files get `0644`, `.env` `0600`),
+  - a compose model is schema-checked with
+    `docker compose -p <project> -f <file> config --quiet` *before* it is
+    written; a broken file is rejected (HTTP 422) and never reaches `up`.
+    This check does not need the daemon. Symlinks are never followed:
+    a stack directory whose compose file or `.env` is a symlink is refused.
+
+The editor shows both files as tabs and reports the save state inline;
+errors on save are generic (compose validation output is only in the audit
+log), and a stale hash asks the editor to reload.
+
+### Deployment requirement for file-backed actions
+
+The stackctl container must have each stack directory mounted **at the same
+in-container path as on the host** and writable by the container user
+(`uid 1000`):
+
+```yaml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv:/srv     # if stacks live in /srv/stacks/<name>
+```
+
+Why "same path": relative bind mounts and build contexts inside a compose
+file are resolved against the project directory — but *the daemon resolves
+them on the host*. If `dir` were `/srv/stacks/media` on the host but mounted
+as `/stacks/media` inside the container, an edited `volumes: - ./data:/data`
+would be applied by `up` as the (nonexistent) host path
+`/stacks/media/data`. Identical paths keep `up` byte-for-byte consistent
+with manual host-side usage.
+
+Without a configured `dir`, a stack keeps the label-based behavior: only
+`start`, `stop` and `restart` (and no editor) are possible; `pull` and `up`
+would fail with "no configuration file provided" because compose cannot
+address a project without its model.
 
 ## HTTP interface
 
@@ -163,21 +238,32 @@ JSON array form, so both Compose output styles work.
 | `GET /auth/callback` | none | Validates and creates the session |
 | `POST /logout` | session + CSRF | Clears the session, redirects to `/` |
 | `GET /api/stacks` | session | JSON list of visible stacks with state and allowed actions |
-| `POST /api/stacks/{name}/{action}` | session + CSRF | Performs an action, returns the new status |
+| `POST /api/stacks/{name}/{action}` | session + CSRF | Performs `start`\|`stop`\|`restart`\|`pull`\|`up`, returns the new status |
+| `GET /api/stacks/{name}/files` | session + `edit` | Which files are editable (or none, without `dir`) |
+| `GET /api/stacks/{name}/files/{kind}` | session + `edit` | One file's content + sha256 (`kind` = `compose` or `env`) |
+| `PUT /api/stacks/{name}/files/{kind}` | session + CSRF + `edit` | Validates, backs up and atomically replaces the file |
+| `GET /stacks/{name}/edit` | session | The file editor page (HTML) |
 | `GET /healthz` | none | Health of the web service (no Docker call) |
 
 Statuses: `running`, `stopped`, `partial`, `not_found` (no containers for the
 project), `unknown` (Docker command failed). Stack names come only from the
 configuration; unknown or invisible stacks return `404`, disallowed actions
-`403` (nothing is executed), a concurrently running action `409`, docker
-failures `502` and timeouts `504` — command output is never returned to
-clients.
+`403` (nothing is executed), file-backed actions on stacks without a usable
+compose model `400`, a concurrently running action `409`, docker failures
+`502` and timeouts `504` — command output is never returned to clients. File
+saves answer `422` when compose rejects the model, `409` on a stale hash, and
+`413`/`400` for oversized or non-text content.
 
-Audit log example (stdout, JSON):
+Audit log examples (stdout, JSON):
 
 ```json
 {"time":"...","level":"INFO","msg":"stack_action","user":"bob","groups":["family"],"stack":"media","project":"media","action":"restart","result":"ok","duration_ms":2310,"remote_ip":"203.0.113.5"}
+{"time":"...","level":"INFO","msg":"stack_action","user":"alice","groups":["editors"],"stack":"media","project":"media","action":"pull","result":"ok","duration_ms":41200,"remote_ip":"203.0.113.5"}
+{"time":"...","level":"INFO","msg":"file_op","user":"alice","groups":["editors"],"stack":"media","file":"compose","op":"save","result":"ok","duration_ms":640,"remote_ip":"203.0.113.5"}
 ```
+
+File saves additionally log `result:"error"` with reasons like
+`compose_validation`, `conflict` or `not_regular_file`.
 
 ## Development
 

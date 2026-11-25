@@ -28,14 +28,22 @@ oidc:
 
 docker:
   compose_binary: "docker"   # invoked as: <binary> compose -p <project> ...
+  pull_timeout: 10m          # bound for pull and up -d (they download images)
 
 stacks:
   - name: "media"              # stable ID used in URLs and rules
     label: "Media Server"      # display name
     project: "media"           # Compose project name (see `docker compose ls`)
+    # Optional: directory of the stack's compose model on the host. Declaring
+    # it enables the file-backed actions pull, up and edit. The stackctl
+    # container must mount this directory at the SAME in-container path
+    # (see compose.example.yaml), writable by the container user.
+    # dir: "/srv/stacks/media"
+    # compose_file: "docker-compose.yml"   # optional; otherwise detected
   - name: "nextcloud"
     label: "Nextcloud"
     project: "nextcloud"
+    dir: "/srv/stacks/nextcloud"
 
 rules:
   - subjects:
@@ -44,6 +52,6 @@ rules:
     stacks: ["*"]                         # "*" means all configured stacks
     actions: ["start", "stop", "restart"]
   - subjects:
-      users: ["bob"]
-    stacks: ["media"]
-    actions: ["restart"]
+      groups: ["editors"]
+    stacks: ["nextcloud"]
+    actions: ["pull", "up", "edit"]       # file-backed; requires stacks[].dir

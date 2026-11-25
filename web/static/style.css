@@ -228,6 +228,103 @@ main {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* --- editor ------------------------------------------------------------ */
+
+main.wide,
+.editor {
+  max-width: none;
+}
+
+.editor-head { margin-bottom: 1rem; }
+.editor-head h1 { font-size: 1.25rem; margin: 0.25rem 0; }
+.editor-note { color: var(--muted); font-size: 0.9rem; margin: 0.25rem 0 0; }
+.back-link {
+  display: inline-block;
+  font-size: 0.9rem;
+  text-decoration: none;
+  color: var(--accent);
+}
+.back-link:hover { text-decoration: underline; }
+
+.tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+
+.tab {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 8px 8px 0 0;
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  cursor: pointer;
+}
+.tab[aria-selected="true"], .tab.tab-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+  border-bottom-color: transparent;
+}
+
+.file-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 0 10px 10px 10px;
+  padding: 0.75rem 0.9rem 0.9rem;
+}
+.file-panel[hidden] { display: none; }
+
+.file-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+.file-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.file-info { color: var(--muted); }
+.file-info-bad { color: var(--bad); }
+.file-warning { color: var(--warn); }
+
+.file-text {
+  width: 100%;
+  min-height: 22rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  tab-size: 2;
+}
+.file-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.6rem;
+}
+.panel-status { font-size: 0.9rem; color: var(--ok); }
+.panel-status[data-kind="warn"] { color: var(--warn); }
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+}
+
 .empty-state {
   text-align: center;
   color: var(--muted);

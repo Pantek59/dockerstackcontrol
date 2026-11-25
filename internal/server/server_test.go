@@ -53,7 +53,10 @@ func testConfig() *config.Config {
 			UsernameClaim: "preferred_username",
 			GroupsClaim:   "groups",
 		},
-		Docker: config.Docker{ComposeBinary: "docker"},
+		Docker: config.Docker{
+			ComposeBinary: "docker",
+			PullTimeout:   config.Duration(30 * time.Second),
+		},
 		Stacks: []config.Stack{
 			{Name: "media", Label: "Media Server", Project: "media"},
 			{Name: "nextcloud", Label: "Nextcloud", Project: "nextcloud"},
@@ -62,7 +65,7 @@ func testConfig() *config.Config {
 			{
 				Subjects: config.SubjectSet{Users: []string{"alice"}, Groups: []string{"admins"}},
 				Stacks:   []string{"*"},
-				Actions:  []string{"start", "stop", "restart"},
+				Actions:  []string{"start", "stop", "restart", "pull", "up", "edit"},
 			},
 			{
 				Subjects: config.SubjectSet{Users: []string{"bob"}, Groups: []string{"family"}},
@@ -75,19 +78,21 @@ func testConfig() *config.Config {
 
 // fakeRunner implements docker.Runner.
 type fakeRunner struct {
-	mu       sync.Mutex
-	statuses map[string]docker.StackStatus
-	statusEr map[string]error
-	doErr    map[string]error
-	doDelay  time.Duration
-	calls    []string
+	mu          sync.Mutex
+	statuses    map[string]docker.StackStatus
+	statusEr    map[string]error
+	doErr       map[string]error
+	validateErr map[string]error
+	doDelay     time.Duration
+	calls       []string
 }
 
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{
-		statuses: map[string]docker.StackStatus{},
-		statusEr: map[string]error{},
-		doErr:    map[string]error{},
+		statuses:    map[string]docker.StackStatus{},
+		statusEr:    map[string]error{},
+		doErr:       map[string]error{},
+		validateErr: map[string]error{},
 	}
 }
 
@@ -106,13 +111,25 @@ func (f *fakeRunner) Status(ctx context.Context, project string) (docker.StackSt
 	return docker.StackStatus{State: docker.StateNotFound, Services: []docker.Service{}}, nil
 }
 
-func (f *fakeRunner) Do(ctx context.Context, project string, action docker.Action) error {
+func (f *fakeRunner) Do(ctx context.Context, spec docker.StackSpec, action docker.Action) error {
 	if f.doDelay > 0 {
 		time.Sleep(f.doDelay)
 	}
+	key := spec.Project + "/" + string(action)
+	if spec.Compose != "" {
+		key += "@" + spec.Compose
+	}
 	f.mu.Lock()
-	err := f.doErr[project+"/"+string(action)]
-	f.calls = append(f.calls, "do:"+project+"/"+string(action))
+	err := f.doErr[key]
+	f.calls = append(f.calls, "do:"+key)
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeRunner) Validate(ctx context.Context, spec docker.StackSpec) error {
+	f.mu.Lock()
+	err := f.validateErr[spec.Project]
+	f.calls = append(f.calls, "validate:"+spec.Project+"/"+spec.Compose)
 	f.mu.Unlock()
 	return err
 }
@@ -309,9 +326,11 @@ func TestAPIStacksAsAdmin(t *testing.T) {
 	if media.Name != "media" || media.Label != "Media Server" || media.State != "running" {
 		t.Errorf("media entry = %+v", media)
 	}
+	// File-backed actions (pull, up, edit) are granted by the rule but
+	// filtered out here: test stacks declare no directory.
 	if len(media.AllowedActions) != 3 ||
 		media.AllowedActions[0] != "start" || media.AllowedActions[1] != "stop" || media.AllowedActions[2] != "restart" {
-		t.Errorf("allowed_actions = %v, want [start stop restart]", media.AllowedActions)
+		t.Errorf("allowed_actions = %v, want [start stop restart] (no dir configured)", media.AllowedActions)
 	}
 	if len(media.Services) != 1 || media.Services[0].Name != "jellyfin" || media.Services[0].State != "running" {
 		t.Errorf("media services = %+v", media.Services)

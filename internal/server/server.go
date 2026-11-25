@@ -100,6 +100,14 @@ func (s *Server) registerRoutes() http.Handler {
 	mux.Handle("GET /api/stacks", s.auth.RequireSession(true, http.HandlerFunc(s.apiStacks)))
 	mux.Handle("POST /api/stacks/{name}/{action}", s.auth.RequireSession(true,
 		s.auth.RequireCSRF(true, http.HandlerFunc(s.apiAction))))
+	// Stack file editing: JSON API for the editor page (reads need a session
+	// only; any write is CSRF-checked like every other state change).
+	mux.Handle("GET /api/stacks/{name}/files", s.auth.RequireSession(true, http.HandlerFunc(s.apiFilesList)))
+	mux.Handle("GET /api/stacks/{name}/files/{kind}", s.auth.RequireSession(true, http.HandlerFunc(s.apiFileRead)))
+	mux.Handle("PUT /api/stacks/{name}/files/{kind}", s.auth.RequireSession(true,
+		s.auth.RequireCSRF(true, http.HandlerFunc(s.apiFileSave))))
+	// The editor itself: server-rendered page, saves go through the JSON API.
+	mux.Handle("GET /stacks/{name}/edit", s.auth.RequireSession(false, http.HandlerFunc(s.editorPage)))
 
 	mux.Handle("GET /static/", s.staticFS)
 
@@ -124,6 +132,10 @@ func (s *Server) notFound(rw http.ResponseWriter, r *http.Request) {
 			rw.Header().Set("Allow", "GET")
 			writeJSONError(rw, http.StatusMethodNotAllowed, "method not allowed")
 			return
+		case strings.HasPrefix(path, "/api/stacks/") && isFileAPIPath(path) && r.Method != http.MethodGet && r.Method != http.MethodPut:
+			rw.Header().Set("Allow", "GET, PUT")
+			writeJSONError(rw, http.StatusMethodNotAllowed, "method not allowed")
+			return
 		case strings.HasPrefix(path, "/api/stacks/") && r.Method != http.MethodPost:
 			rw.Header().Set("Allow", "POST")
 			writeJSONError(rw, http.StatusMethodNotAllowed, "method not allowed")
@@ -133,6 +145,21 @@ func (s *Server) notFound(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderErrorPage(rw, r, http.StatusNotFound, "page not found")
+}
+
+// isFileAPIPath reports whether the path targets the files API
+// (/api/stacks/{name}/files[/{kind}]) as opposed to the action endpoint
+// (/api/stacks/{name}/{action}).
+func isFileAPIPath(path string) bool {
+	rest := strings.TrimPrefix(path, "/api/stacks/")
+	if rest == path { // did not start with the prefix
+		return false
+	}
+	_, files, found := strings.Cut(rest, "/")
+	if !found { // /api/stacks/{name}: an action path, not a files path
+		return false
+	}
+	return files == "files" || strings.HasPrefix(files, "files/")
 }
 
 func isAPIPath(p string) bool { return strings.HasPrefix(p, "/api/") }

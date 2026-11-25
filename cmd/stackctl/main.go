@@ -56,6 +56,7 @@ func run(logger *slog.Logger) error {
 		"cookie_secure", cfg.Server.CookieSecure,
 		"session_ttl", cfg.Server.SessionTTL.Std().String(),
 		"command_timeout", cfg.Server.CommandTimeout.Std().String(),
+		"pull_timeout", cfg.Docker.PullTimeout.Std().String(),
 	)
 
 	// OIDC discovery happens here: an unreachable provider aborts startup.
@@ -64,7 +65,14 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	runner := docker.NewExecRunner(cfg.Docker.ComposeBinary, cfg.Server.CommandTimeout.Std())
+	// pull_timeout bounds the slowest commands (pull, up -d), so the write
+	// timeout must at least cover that, not only command_timeout.
+	dockerTimeout := cfg.Server.CommandTimeout.Std()
+	if pull := cfg.Docker.PullTimeout.Std(); pull > dockerTimeout {
+		dockerTimeout = pull
+	}
+	runner := docker.NewExecRunner(cfg.Docker.ComposeBinary,
+		cfg.Server.CommandTimeout.Std(), cfg.Docker.PullTimeout.Std())
 	srv, err := server.New(holder, runner, svc, aud, logger)
 	if err != nil {
 		return err
@@ -73,8 +81,8 @@ func run(logger *slog.Logger) error {
 	httpServer := &http.Server{
 		Addr: cfg.Server.Listen,
 		// Write timeout must exceed the longest Docker command timeout, or
-		// the response of a slow restart would be cut off.
-		WriteTimeout:      cfg.Server.CommandTimeout.Std() + 30*time.Second,
+		// the response of a slow restart or pull would be cut off.
+		WriteTimeout:      dockerTimeout + 30*time.Second,
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,

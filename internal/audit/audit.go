@@ -45,6 +45,30 @@ func (a *Logger) StackAction(user string, groups []string, stack, project, actio
 	a.slog.Info("stack_action", args...)
 }
 
+// FileOp records one stack file operation (read or save of the compose
+// model or the .env file). file is the kind ("compose"/"env"), never raw
+// content. result is "ok", "denied", "conflict", "error"; reason explains a
+// denial or validation failure.
+func (a *Logger) FileOp(user string, groups []string, stack, file, op, result, reason, remoteIP string, duration time.Duration) {
+	args := []any{
+		"user", user,
+		"groups", groups,
+		"stack", stack,
+		"file", file,
+		"op", op,
+		"result", result,
+		"duration_ms", duration.Milliseconds(),
+		"remote_ip", remoteIP,
+	}
+	if groups == nil {
+		args[3] = []string{}
+	}
+	if reason != "" {
+		args = append(args, "reason", reason)
+	}
+	a.slog.Info("file_op", args...)
+}
+
 // Login records a successful or failed login attempt. detail carries a short
 // sanitized cause on failure.
 func (a *Logger) Login(user string, success bool, remoteIP, detail string) {

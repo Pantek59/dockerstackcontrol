@@ -20,6 +20,11 @@ func testConfig() *config.Config {
 				Stacks:   []string{"*"},
 				Actions:  []string{"start", "stop", "restart"},
 			},
+			{ // file-backed actions for the editors group on media
+				Subjects: config.SubjectSet{Groups: []string{"editors"}},
+				Stacks:   []string{"media"},
+				Actions:  []string{"pull", "up", "edit"},
+			},
 			{ // bob: restart only on media
 				Subjects: config.SubjectSet{Users: []string{"bob"}},
 				Stacks:   []string{"media"},
@@ -36,6 +41,21 @@ func testConfig() *config.Config {
 				Actions:  []string{"start"},
 			},
 		},
+	}
+}
+
+// fileActionsConfig grants only the file-backed actions on media, so the
+// union/ordering can be checked in isolation.
+func fileActionsConfig() *config.Config {
+	return &config.Config{
+		Stacks: []config.Stack{
+			{Name: "media", Label: "Media Server", Project: "media"},
+		},
+		Rules: []config.Rule{{
+			Subjects: config.SubjectSet{Groups: []string{"editors"}},
+			Stacks:   []string{"media"},
+			Actions:  []string{"pull", "up", "edit"},
+		}},
 	}
 }
 
@@ -92,6 +112,12 @@ func TestAllowedActions(t *testing.T) {
 			name: "unknown action is never allowed",
 			user: "alice", stack: "media",
 			want: []string{"start", "stop", "restart"},
+		},
+		{
+			name: "file-backed actions in canonical order",
+			cfg:  fileActionsConfig(),
+			user: "dana", groups: []string{"editors"}, stack: "media",
+			want: []string{"pull", "up", "edit"},
 		},
 	}
 	for _, tc := range tests {

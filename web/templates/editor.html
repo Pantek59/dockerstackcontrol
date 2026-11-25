@@ -1,0 +1,51 @@
+{{define "scripts"}}<script src="/static/editor.js" defer></script>{{end}}
+
+{{define "content"}}
+<section class="editor" data-stack="{{.StackName}}">
+  <div class="editor-head">
+    <a class="back-link" href="/">&#8592; Dashboard</a>
+    <h1>{{.StackLabel}}</h1>
+    <p class="editor-note">Stack files on the Docker host. After saving, apply
+    changes with <strong>Pull</strong> and <strong>Up</strong> on the
+    dashboard. A backup of the previous version is kept next to the file.</p>
+  </div>
+
+  <div id="editor-banner" class="banner" role="alert" hidden></div>
+
+  <div class="tabs" role="tablist">
+    <button type="button" class="tab tab-active" data-kind="compose" role="tab" aria-selected="true">docker-compose.yml</button>
+    <button type="button" class="tab" data-kind="env" role="tab" aria-selected="false">.env</button>
+  </div>
+
+  {{with .Compose}}{{template "filepanel" .}}{{end}}
+  {{with .Env}}{{template "filepanel" .}}{{end}}
+</section>
+{{end}}
+
+{{define "filepanel"}}
+<article class="file-panel" data-kind="{{.Kind}}" data-hash="{{.Hash}}" {{if ne .Kind "compose"}}hidden{{end}}>
+  <div class="file-meta">
+    <span class="file-name">{{.Name}}</span>
+    {{if .Irregular}}
+      <span class="file-info file-info-bad">not a regular file &#8212; blocked</span>
+    {{else if .Exists}}
+      <span class="file-info">{{.Size}} bytes &#183; saved {{.Modified}}</span>
+    {{else}}
+      <span class="file-info">new file &#8212; saving creates it</span>
+    {{end}}
+  </div>
+  {{if .Irregular}}
+  <p class="file-warning">This path exists on disk but is not a regular file
+  (symlink, directory or device). Stack Control refuses to read or overwrite
+  it.</p>
+  {{else}}
+  <label class="sr-only" for="textarea-{{.Kind}}">Content of {{.Name}}</label>
+  <textarea id="textarea-{{.Kind}}" class="file-text" spellcheck="false" wrap="off">{{.Text}}</textarea>
+  <div class="panel-actions">
+    <button type="button" class="save action action-start">Save</button>
+    <button type="button" class="reload btn-link">Reload</button>
+    <span class="panel-status" hidden></span>
+  </div>
+  {{end}}
+</article>
+{{end}}

@@ -12,6 +12,7 @@ import (
 	"github.com/Pantek59/dockerstackcontrol/internal/authz"
 	"github.com/Pantek59/dockerstackcontrol/internal/config"
 	"github.com/Pantek59/dockerstackcontrol/internal/docker"
+	"github.com/Pantek59/dockerstackcontrol/internal/stackfiles"
 )
 
 // writeJSONError writes a small JSON error body for API responses.
@@ -74,7 +75,7 @@ func (s *Server) apiStacks(rw http.ResponseWriter, r *http.Request) {
 				Label:          st.Label,
 				State:          docker.StateUnknown,
 				Services:       []docker.Service{},
-				AllowedActions: authz.AllowedActions(cfg, user.Username, user.Groups, st.Name),
+				AllowedActions: visibleAllowedActions(cfg, user, st),
 			}
 			status, err := s.runner.Status(r.Context(), st.Project)
 			if err != nil {
@@ -96,38 +97,14 @@ func (s *Server) apiStacks(rw http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeJSON marshals v and writes it with the status code. Encoding these
-// plain structs cannot fail; a write error (client gone) is not actionable.
-func writeJSON(rw http.ResponseWriter, status int, v any) {
-	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
-	rw.WriteHeader(status)
-	_ = json.NewEncoder(rw).Encode(v)
-}
-
-// apiAction performs start/stop/restart on one stack. This is the security
-// entry point for mutating requests; the order checks are:
-//
-//  1. session + CSRF (middleware, before us),
-//  2. stack known and visible to the user (404 otherwise — unknown and
-//     invisible stacks are indistinguishable on purpose),
-//  3. action allowed for this user (403 otherwise),
-//  4. per-stack lock (409 when an action is already running),
-//  5. docker compose action (502/504 on failure, never leaking output).
-//
-// Every attempt — granted or not — produces one audit line.
-func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
-	user, ok := auth.UserFrom(r.Context())
-	if !ok {
-		writeJSONError(rw, http.StatusUnauthorized, "no session")
-		return
-	}
+// requireStackAccess resolves the named stack for the user and writes the
+// shared 404/403 responses (with their audit lines) when access is not
+// granted. It returns (stack, "known-and-visible", "action-allowed").
+func (s *Server) requireStackAccess(rw http.ResponseWriter, r *http.Request, user auth.User, actionStr string) (config.Stack, bool) {
 	cfg := s.holder.Get()
 	name := r.PathValue("name")
-	actionStr := r.PathValue("action")
-
 	remoteIP := RemoteIP(cfg, r)
 
-	// (1) Stack known? (2) Visible? Unknown and invisible share 404.
 	stack, known := cfg.Stack(name)
 	if !known || !authz.IsVisible(cfg, user.Username, user.Groups, name) {
 		project := name
@@ -137,36 +114,117 @@ func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
 		s.audit.StackAction(user.Username, user.Groups, name, project, actionStr,
 			"denied", "unknown_or_invisible", remoteIP, 0)
 		writeJSONError(rw, http.StatusNotFound, "not found")
-		return
+		return config.Stack{}, false
 	}
-
-	// (3) Action allowed?
 	if !authz.Can(cfg, user.Username, user.Groups, name, actionStr) {
 		s.audit.StackAction(user.Username, user.Groups, name, stack.Project, actionStr,
 			"denied", "no_permission", remoteIP, 0)
 		writeJSONError(rw, http.StatusForbidden, "action not allowed")
+		return config.Stack{}, false
+	}
+	return stack, true
+}
+
+// visibleAllowedActions returns the user's allowed actions on the stack with
+// the file-backed actions (pull, up, edit) removed when the stack does not
+// declare a directory: those buttons must not render, and the endpoints must
+// not pretend they work, without a compose model on disk.
+func visibleAllowedActions(cfg *config.Config, user auth.User, stack config.Stack) []string {
+	allowed := authz.AllowedActions(cfg, user.Username, user.Groups, stack.Name)
+	if stack.Dir != "" {
+		return allowed
+	}
+	out := make([]string, 0, len(allowed))
+	for _, a := range allowed {
+		if config.ActionRequiresFiles(a) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// writeJSON marshals v and writes it with the status code. Encoding these
+// plain structs cannot fail; a write error (client gone) is not actionable.
+func writeJSON(rw http.ResponseWriter, status int, v any) {
+	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+	rw.WriteHeader(status)
+	_ = json.NewEncoder(rw).Encode(v)
+}
+
+// apiAction performs start/stop/restart/pull/up on one stack. This is the
+// security entry point for mutating requests; the order checks are:
+//
+//  1. session + CSRF (middleware, before us),
+//  2. stack known and visible to the user (404 otherwise — unknown and
+//     invisible stacks are indistinguishable on purpose),
+//  3. action allowed for this user (403 otherwise),
+//  4. per-stack lock (409 when an action is already running),
+//  5. docker compose action (502/504 on failure, never leaking output).
+//
+// The file-backed actions pull and up additionally require the stack to
+// declare a directory with a resolvable main compose file; 400 otherwise
+// (audited as "no_directory"/"compose_unresolved"). That precondition is
+// checked again here even though the UI already hides the buttons
+// (defense in depth: the API is the enforcement point).
+//
+// Every attempt — granted or not — produces one audit line.
+func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
+	user, ok := auth.UserFrom(r.Context())
+	if !ok {
+		writeJSONError(rw, http.StatusUnauthorized, "no session")
 		return
 	}
-	action, _ := docker.ParseAction(actionStr) // Can above guarantees validity
+	cfg := s.holder.Get()
+	actionStr := r.PathValue("action")
+	remoteIP := RemoteIP(cfg, r)
+
+	// (1) Stack known? (2) Visible? (3) Action allowed? Unknown and
+	// invisible share 404; disallowed actions get 403.
+	stack, access := s.requireStackAccess(rw, r, user, actionStr)
+	if !access {
+		return
+	}
+	action, valid := docker.ParseAction(actionStr)
+	if !valid {
+		// authz.Can only accepts actions in the config enum; "edit" is one
+		// of those but has no action endpoint (it is the editor page).
+		s.audit.StackAction(user.Username, user.Groups, stack.Name, stack.Project, actionStr,
+			"denied", "no_such_endpoint", remoteIP, 0)
+		writeJSONError(rw, http.StatusNotFound, "not found")
+		return
+	}
 
 	// (4) Serialize: at most one running action per stack; concurrent calls
 	// get 409 instead of queuing behind a potentially long operation.
-	lock := s.lockFor(name)
+	lock := s.lockFor(stack.Name)
 	if !lock.TryLock() {
-		s.audit.StackAction(user.Username, user.Groups, name, stack.Project, actionStr,
+		s.audit.StackAction(user.Username, user.Groups, stack.Name, stack.Project, actionStr,
 			"conflict", "in_progress", remoteIP, 0)
 		writeJSONError(rw, http.StatusConflict, "an action is already running for this stack")
 		return
 	}
 	defer lock.Unlock()
 
-	// (5) Execute.
+	// (5) Execute. File-backed actions resolve the compose model first.
+	spec := docker.StackSpec{Project: stack.Project}
+	if actionRequiresFile(action) {
+		composeFile, ferr := s.composeFileFor(stack)
+		if ferr != "" {
+			s.audit.StackAction(user.Username, user.Groups, stack.Name, stack.Project, actionStr,
+				"denied", ferr, remoteIP, 0)
+			writeJSONError(rw, http.StatusBadRequest, "stack has no usable compose file (is \"dir\" configured?)")
+			return
+		}
+		spec.Dir, spec.Compose = stack.Dir, composeFile
+	}
+
 	start := time.Now()
-	err := s.runner.Do(r.Context(), stack.Project, action)
+	err := s.runner.Do(r.Context(), spec, action)
 	duration := time.Since(start)
 
 	result, status := classifyDockerActionError(err)
-	s.audit.StackAction(user.Username, user.Groups, name, stack.Project, actionStr,
+	s.audit.StackAction(user.Username, user.Groups, stack.Name, stack.Project, actionStr,
 		result, "", remoteIP, duration)
 	if err != nil {
 		// Sanitized: command output never reaches the client.
@@ -181,7 +239,7 @@ func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
 		Label:          stack.Label,
 		State:          docker.StateUnknown,
 		Services:       []docker.Service{},
-		AllowedActions: authz.AllowedActions(cfg, user.Username, user.Groups, name),
+		AllowedActions: visibleAllowedActions(cfg, user, stack),
 	}
 	status2, serr := s.runner.Status(r.Context(), stack.Project)
 	if serr != nil {
@@ -192,6 +250,28 @@ func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
 		entry.Services = status2.Services
 	}
 	writeJSON(rw, http.StatusOK, entry)
+}
+
+// actionRequiresFile mirrors docker's requiresFile without leaking the enum
+// into a public wrapper: the server knows which actions are file-backed.
+func actionRequiresFile(action docker.Action) bool {
+	return action == docker.ActionPull || action == docker.ActionUp
+}
+
+// composeFileFor resolves the absolute path of the stack's main compose
+// model. It returns the path or a (sanitized, auditable) reason for the
+// failure.
+func (s *Server) composeFileFor(stack config.Stack) (string, string) {
+	path, ok, err := stackfiles.ResolveCompose(stack.Dir, stack.ComposeFile)
+	if !ok {
+		return "", "no_directory"
+	}
+	if err != nil {
+		s.logger.Warn("compose file resolution failed",
+			"stack", stack.Name, "project", stack.Project, "err", err)
+		return "", "compose_unresolved"
+	}
+	return path, ""
 }
 
 // classifyDockerActionError maps runner errors to audit results and HTTP

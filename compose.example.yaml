@@ -26,6 +26,14 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Configuration, loaded fresh again on SIGHUP (docker compose kill -s HUP stackctl).
       - ./config.yaml:/etc/stackctl/config.yaml:ro
+      #
+      # Stack directories for the file-backed actions (pull, up, edit).
+      # IMPORTANT: mount each host path at the SAME in-container path.
+      # Docker resolves relative bind mounts inside a compose file against
+      # the daemon's view of the host, so a mount rewrite like
+      # /srv:/data would produce containers with broken paths once files
+      # are edited and applied with "up".
+      # - /srv:/srv
     environment:
       STACKCTL_OIDC_SECRET: ${STACKCTL_OIDC_SECRET}
       STACKCTL_HASH_KEY: ${STACKCTL_HASH_KEY}

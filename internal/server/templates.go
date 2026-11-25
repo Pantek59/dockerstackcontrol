@@ -27,7 +27,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 	if err != nil {
 		return nil, err
 	}
-	pages := []string{"dashboard.html", "error.html"}
+	pages := []string{"dashboard.html", "error.html", "editor.html"}
 	out := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
 		clone, err := base.Clone()
@@ -58,8 +58,9 @@ func staticHandler() (http.Handler, error) {
 }
 
 // renderPage executes the named page wrapped in the layout with the given
-// HTTP status.
-func (s *Server) renderPage(rw http.ResponseWriter, page string, data PageData, status int) {
+// HTTP status. data is the page's template data (PageData for most pages,
+// EditorData for the editor); the layout only requires Username/CSRFToken.
+func (s *Server) renderPage(rw http.ResponseWriter, page string, data any, status int) {
 	tpl, ok := s.templates[page]
 	if !ok {
 		http.Error(rw, "template missing", http.StatusInternalServerError)

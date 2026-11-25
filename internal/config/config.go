@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -33,31 +34,52 @@ const (
 	DefaultListen         = ":8080"
 	DefaultSessionTTL     = 12 * time.Hour
 	DefaultCommandTimeout = 120 * time.Second
+	DefaultPullTimeout    = 10 * time.Minute
 	DefaultComposeBinary  = "docker"
 	DefaultUsernameClaim  = "preferred_username"
 	DefaultGroupsClaim    = "groups"
 )
 
 // Action names as used in rule declarations.
+//
+// start/stop/restart operate on the existing containers of a project and
+// never need a compose file. pull/up recreate from a compose model and edit
+// touches the stack files, so all three require the stack to declare "dir".
 const (
 	ActionStart   = "start"
 	ActionStop    = "stop"
 	ActionRestart = "restart"
+	ActionPull    = "pull"
+	ActionUp      = "up"
+	ActionEdit    = "edit"
 )
+
+// ActionRequiresFiles reports whether an action needs the stack's compose
+// model on disk (config.Stack.Dir).
+func ActionRequiresFiles(action string) bool {
+	return action == ActionPull || action == ActionUp || action == ActionEdit
+}
 
 // CanonicalActions is the canonical, deterministic order used wherever a list
 // of a user's allowed actions is rendered or compared.
-var CanonicalActions = []string{ActionStart, ActionStop, ActionRestart}
+var CanonicalActions = []string{ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp, ActionEdit}
 
 // ValidAction reports whether s is one of the known action names.
 func ValidAction(s string) bool {
-	return s == ActionStart || s == ActionStop || s == ActionRestart
+	switch s {
+	case ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp, ActionEdit:
+		return true
+	}
+	return false
 }
 
 var (
 	validStackNameRegexp   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 	validProjectNameRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 	envReferenceRegexp     = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	// A compose file override is joined to the stack directory; it must be a
+	// single plain file name so it can never point outside that directory.
+	validComposeFileRegexp = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 )
 
 // ValidStackName reports whether name matches the required stack name syntax
@@ -125,15 +147,27 @@ type OIDC struct {
 // Docker configures how docker compose is invoked.
 type Docker struct {
 	ComposeBinary string `yaml:"compose_binary"`
+	// PullTimeout bounds the file-backed commands pull and up -d, which
+	// download and thereby outlast interactive actions such as restart.
+	PullTimeout Duration `yaml:"pull_timeout"`
 }
 
 // Stack is one manageable Compose project. Name is the stable identifier used
 // in URLs and rules; Project is the Compose project name and is never taken
 // from user input.
+//
+// Dir optionally points at the directory on the Docker host that holds the
+// stack's compose model ("docker-compose.yml" and ".env"). It enables the
+// file-backed actions pull, up and edit. When it is unset the stack remains
+// label-based: only start/stop/restart work (docker compose cannot pull or
+// up a project without its file). ComposeFile overrides the detected main
+// compose file inside Dir.
 type Stack struct {
-	Name    string `yaml:"name"`
-	Label   string `yaml:"label"`
-	Project string `yaml:"project"`
+	Name        string `yaml:"name"`
+	Label       string `yaml:"label"`
+	Project     string `yaml:"project"`
+	Dir         string `yaml:"dir"`
+	ComposeFile string `yaml:"compose_file"`
 }
 
 // Rule grants actions on stacks to subjects. Matching rules are unioned.
@@ -188,7 +222,10 @@ func defaults() *Config {
 			UsernameClaim: DefaultUsernameClaim,
 			GroupsClaim:   DefaultGroupsClaim,
 		},
-		Docker: Docker{ComposeBinary: DefaultComposeBinary},
+		Docker: Docker{
+			ComposeBinary: DefaultComposeBinary,
+			PullTimeout:   Duration(DefaultPullTimeout),
+		},
 	}
 }
 
@@ -335,6 +372,9 @@ func (c *Config) Validate() error {
 	if c.Docker.ComposeBinary == "" {
 		fail("docker.compose_binary must not be empty")
 	}
+	if c.Docker.PullTimeout <= 0 {
+		fail("docker.pull_timeout must be positive")
+	}
 
 	// --- stacks ---
 	seen := make(map[string]bool, len(c.Stacks))
@@ -351,6 +391,29 @@ func (c *Config) Validate() error {
 		}
 		if s.Label == "" {
 			c.Stacks[i].Label = s.Name
+		}
+		// Dir is optional, but if declared it must be a safe absolute path:
+		// it is joined — never traversed — when files are addressed, and it
+		// is passed to the compose CLI as part of -f <dir>/<file>.
+		if s.Dir != "" {
+			cleaned := filepath.Clean(s.Dir)
+			if !filepath.IsAbs(cleaned) || cleaned != s.Dir {
+				fail("stacks[%d].dir %q must be a clean absolute path", i, s.Dir)
+			}
+			if strings.ContainsRune(cleaned, '\\') {
+				fail("stacks[%d].dir %q must use / as path separator", i, s.Dir)
+			}
+			c.Stacks[i].Dir = cleaned
+		}
+		// ComposeFile, when overridden, is joined to Dir; it must stay a
+		// single file name so it cannot point anywhere else in the tree.
+		if s.ComposeFile != "" {
+			if s.Dir == "" {
+				fail("stacks[%d].compose_file %q requires stacks[%d].dir to be set", i, s.ComposeFile, i)
+			}
+			if !validComposeFileRegexp.MatchString(s.ComposeFile) {
+				fail("stacks[%d].compose_file %q must be a plain file name", i, s.ComposeFile)
+			}
 		}
 	}
 

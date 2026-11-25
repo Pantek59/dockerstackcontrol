@@ -24,6 +24,6 @@
     <div id="banner" class="banner" role="alert" hidden></div>
     {{template "content" .}}
   </main>
-  <script src="/static/app.js" defer></script>
+  {{block "scripts" .}}<script src="/static/app.js" defer></script>{{end}}
 </body>
 </html>

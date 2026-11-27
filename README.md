@@ -136,14 +136,37 @@ containers of that project.
 
 ### 4. Configure and deploy
 
-Copy `config.example.yaml` to `config.yaml`, fill in your values and deploy
-with the example Compose file:
+Copy `config.example.yaml` to `config.yaml` and put your secrets into `.env`
+(see the comments in `compose.example.yaml`). Then pick one of the two
+deployment paths - the server needs **no Go toolchain** in either one:
+
+**A. Pull the pre-built image (recommended).** CI publishes the image to GHCR
+on release tags; you pin a version deliberately:
+
+```sh
+cp compose.example.yaml compose.yaml    # pulls ghcr.io/pantek59/dockerstackcontrol:<tag>
+docker compose up -d
+```
+
+The first GHCR package publish is **private** - either make the package
+public in the repository's *Packages* settings, or authenticate the server
+once (`echo <PAT> | docker login ghcr.io -u <user> --password-stdin`).
+Updates are deliberate: bump the tag in `compose.yaml`, `up -d`, and rolling
+back is restoring the previous tag line.
+
+**B. Build from source on the server** (no Go needed either - the build runs
+inside a throwaway Go container):
 
 ```sh
 cp compose.example.yaml compose.yaml
-# put the secrets into .env (see comments in compose.example.yaml)
+# switch the service to: build: .  /  image: stackctl:dev  (commented in compose.example.yaml)
 docker compose up -d --build
 ```
+
+A plain single-binary deployment (no Compose for stackctl itself) works too:
+`CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o stackctl ./cmd/stackctl`
+on any machine with Go, copy the static binary + `docker` CLI assumption to
+the target host, and run it from a systemd unit (see `main` flags).
 
 Run it behind a reverse proxy that terminates TLS and forwards to port 8080.
 Set `server.trusted_proxies` to your proxy's addresses so client addresses in
@@ -159,6 +182,25 @@ To reload the configuration after editing it:
 ```sh
 docker compose kill -s HUP stackctl
 ```
+
+### Releasing a new version (maintainers)
+
+CI publishes the container image to GHCR automatically. Push a release tag
+and the `publish` job builds the image with the version stamped into the
+binary, then pushes `ghcr.io/pantek59/dockerstackcontrol` tagged with the
+version (`1.2.3`) and the minor line (`1.2`), but **no `latest`** - versions
+are pinned on purpose (see the note in `compose.example.yaml`). The publish
+job only runs after the full test job (`vet`, `staticcheck`,
+`go test -race`) has passed:
+
+```sh
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+The stamp shows up in the startup audit line (`msg: listening`), so a running
+instance always declares exactly which build it is; `go build` without the
+ldflags reports `dev`.
 
 ### Compose version
 

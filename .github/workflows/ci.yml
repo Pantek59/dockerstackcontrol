@@ -31,13 +31,14 @@ jobs:
   # Publishes the container image to GHCR when a release tag (vX.Y.Z) is
   # pushed. Intentionally does NOT publish a floating `latest` tag: servers
   # pin a version (1.0.0 or 1.0) deliberately and roll back by reverting the
-  # tag in their compose file.
+  # tag in their compose file. The same job cross-compiles static binaries
+  # (linux/windows) and attaches them to the GitHub release.
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -67,3 +68,28 @@ jobs:
           build-args: VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Static binaries for hosts without docker: linux/amd64, linux/arm64
+      # and windows/amd64, each stamped with the release version, attached
+      # to the release together with a sha256 checksum file.
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            GOOS="${target%%/*}"
+            GOARCH="${target##*/}"
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
+              -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "dist/stackctl-${GOOS}-${GOARCH}${EXT}" ./cmd/stackctl
+          done
+          (cd dist && sha256sum stackctl-* > checksums.txt)
+
+      - name: Attach release binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag --generate-notes --title "stackctl ${GITHUB_REF_NAME}"

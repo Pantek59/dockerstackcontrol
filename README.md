@@ -202,6 +202,11 @@ The stamp shows up in the startup audit line (`msg: listening`), so a running
 instance always declares exactly which build it is; `go build` without the
 ldflags reports `dev`.
 
+The same job attaches static **release binaries** to the GitHub release -
+`stackctl-linux-amd64`, `stackctl-linux-arm64` and `stackctl-windows-amd64`
+(each stamped with the version) plus a `checksums.txt` - so hosts without a
+container registry pull can download them from the release page directly.
+
 ### Compose version
 
 stackctl invokes the compose CLI as

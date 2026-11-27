@@ -6,10 +6,8 @@ permissions. Users log in with an external OpenID Connect provider, see only
 the stacks they are allowed to see, and can perform only the actions they are
 allowed to perform.
 
-Written in Go as a single static binary. No database: all state is the
-configuration file plus the Docker daemon. No framework, no build step for
-the GUI: server-rendered templates with one small embedded script and
-stylesheet.
+A single self-contained Go binary with a server-rendered web UI. No database:
+all state is the configuration file plus the Docker daemon.
 
 ```
 ┌────────────┐   HTTPS    ┌───────────────┐  docker compose   ┌───────────────┐
@@ -23,9 +21,8 @@ stylesheet.
 ```
 
 > ⚠️ **Security warning.** Access to the Docker socket is equivalent to root
-> on the host. stackctl is a privilege boundary in front of it and is written
-> accordingly (strict allowlist of stacks, arguments validated before any
-> command, no shell, CSRF and Origin checks, authorization on every request,
+> on the host. stackctl is a privilege boundary in front of it (strict
+> allowlist of stacks, authorization on every request, CSRF and Origin checks,
 > secrets never logged), but deploying it means giving its container that
 > socket access. Only expose it behind TLS, keep the container isolated, and
 > treat anyone with `group add`/exec rights on the host as effectively root.
@@ -40,20 +37,19 @@ stylesheet.
 
 ## Features
 
-- OIDC login: authorization code flow with PKCE, `state`/`nonce` checks, ID
-  token signature/issuer/audience/expiry validation, optional required group.
-- Stateless encrypted session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`,
-  bounded lifetime); no server-side session store.
-- Dashboard listing visible stacks with live status and per-action buttons;
-  actions: `start`, `stop`, `restart` on a whole Compose project, plus — for
-  stacks that declare a `dir` — `pull` (fetch newer images) and `up`
-  (recreate from the compose model) and a file editor for the stack's
+- Login through your OIDC provider (Keycloak, Authentik, Authelia, …).
+- Dashboard listing the stacks a user may see, with live status and one
+  button per allowed action: `start`, `stop`, `restart` on a whole Compose
+  project — plus, for stacks with a configured `dir`, `pull` (fetch newer
+  images), `up` (recreate from the compose model), `update` (pull and then
+  recreate, best effort) and a file editor for the stack's
   `docker-compose.yml` and `.env`.
 - Server-side authorization on every request (the UI is a convenience, never
-  the enforcement point), CSRF token + `Origin` check on every state change.
-- Structured JSON audit log (`log/slog`) of every action attempt, file
-  read/save, login, logout, denial and config reload.
-- Hot reload of permissions via `SIGHUP`; sessions stay valid.
+  the enforcement point); unknown actions and stacks never reach Docker.
+- Structured JSON audit log of every action attempt, file read/save, login,
+  logout, denial and config reload.
+- Permission changes apply on `SIGHUP` without restarting; sessions stay
+  valid.
 - Deliberately **not** included: creating/deleting stacks, volumes or
   networks, compose override files (only the main model is editable), log
   viewing, shells, multi-host support, local user accounts, a database.
@@ -65,6 +61,8 @@ Everything is configured in one YAML file
 <path>`). See [`config.example.yaml`](config.example.yaml) for a documented
 example. `${ENV_NAME}` references are expanded from the environment on load;
 unknown keys and invalid values fail startup.
+
+### Permissions
 
 Authorization is deny-by-default and defined by rules:
 
@@ -87,9 +85,9 @@ an entry in `groups`). A stack is visible if the user has at least one action
 on it; only the allowed buttons are rendered. With no rules a user can log in
 and sees an empty list.
 
-Actions: `start`, `stop`, `restart` need no compose files; `pull`, `up` and
-`edit` need the stack to declare `stacks[].dir` (see below) and are hidden
-from users when it is missing.
+Actions: `start`, `stop`, `restart` need no compose files; `pull`, `up`,
+`update` and `edit` need the stack to declare `stacks[].dir` (see below) and
+are hidden from users when it is missing.
 
 On `SIGHUP` the file is re-read and validated; on success the new rules apply
 to the next request without restarting or invalidating sessions (as long as
@@ -100,8 +98,8 @@ serving and the outcome is audited.
 
 ### 1. Register the OIDC client
 
-Create a confidential OIDC client for stackctl at your provider (Keycloak,
-Authentik, Authelia, …). Set the exact redirect URI to
+Create a confidential OIDC client for stackctl at your provider. Set the exact
+redirect URI to
 
 ```
 <external_url>/auth/callback
@@ -137,25 +135,25 @@ containers of that project.
 ### 4. Configure and deploy
 
 Copy `config.example.yaml` to `config.yaml` and put your secrets into `.env`
-(see the comments in `compose.example.yaml`). Then pick one of the two
-deployment paths - the server needs **no Go toolchain** in either one:
+(see the comments in `compose.example.yaml`). Then pick one of the deployment
+paths below — the server needs **no Go toolchain** in any of them.
 
-**A. Pull the pre-built image (recommended).** CI publishes the image to GHCR
-on release tags; you pin a version deliberately:
+**A. Pull the pre-built image (recommended).** Pre-built images are published
+to `ghcr.io/pantek59/dockerstackcontrol` for every release tag:
 
 ```sh
 cp compose.example.yaml compose.yaml    # pulls ghcr.io/pantek59/dockerstackcontrol:<tag>
 docker compose up -d
 ```
 
-The first GHCR package publish is **private** - either make the package
+The first GHCR package publish is **private** — either make the package
 public in the repository's *Packages* settings, or authenticate the server
 once (`echo <PAT> | docker login ghcr.io -u <user> --password-stdin`).
-Updates are deliberate: bump the tag in `compose.yaml`, `up -d`, and rolling
-back is restoring the previous tag line.
+Versions are pinned on purpose: bump the tag in `compose.yaml` to update, and
+rolling back is restoring the previous tag line.
 
-**B. Build from source on the server** (no Go needed either - the build runs
-inside a throwaway Go container):
+**B. Build with Compose on the server** (the build runs inside a throwaway Go
+container, no Go installation needed):
 
 ```sh
 cp compose.example.yaml compose.yaml
@@ -163,10 +161,11 @@ cp compose.example.yaml compose.yaml
 docker compose up -d --build
 ```
 
-A plain single-binary deployment (no Compose for stackctl itself) works too:
-`CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o stackctl ./cmd/stackctl`
-on any machine with Go, copy the static binary + `docker` CLI assumption to
-the target host, and run it from a systemd unit (see `main` flags).
+**C. Plain binary, no Compose for stackctl itself.** Download a release
+binary from the GitHub release page (or build on any machine with Go: see
+[DEVELOPMENT.md](DEVELOPMENT.md)), copy it to the target host, and run it from
+a systemd unit; `stackctl -help` lists the flags (`-config <path>` selects the
+configuration file).
 
 Run it behind a reverse proxy that terminates TLS and forwards to port 8080.
 Set `server.trusted_proxies` to your proxy's addresses so client addresses in
@@ -177,53 +176,22 @@ To grant the container access to the socket, add the host `docker` group
 `getent group docker | cut -d: -f3`). The container user is non-root
 (`uid 1000`).
 
+### Reloading and upgrading
+
 To reload the configuration after editing it:
 
 ```sh
 docker compose kill -s HUP stackctl
 ```
 
-### Releasing a new version (maintainers)
+To upgrade, bump the image tag in `compose.yaml` and `docker compose up -d`
+(rollback: restore the previous tag line). The running version shows up in
+the startup audit line (`msg: listening`), so an instance always declares
+exactly which build it is.
 
-CI publishes the container image to GHCR automatically. Push a release tag
-and the `publish` job builds the image with the version stamped into the
-binary, then pushes `ghcr.io/pantek59/dockerstackcontrol` tagged with the
-version (`1.2.3`) and the minor line (`1.2`), but **no `latest`** - versions
-are pinned on purpose (see the note in `compose.example.yaml`). The publish
-job only runs after the full test job (`vet`, `staticcheck`,
-`go test -race`) has passed:
+## Pull, up, update and editing stack files
 
-```sh
-git tag v1.2.3
-git push origin v1.2.3
-```
-
-The stamp shows up in the startup audit line (`msg: listening`), so a running
-instance always declares exactly which build it is; `go build` without the
-ldflags reports `dev`.
-
-The same job attaches static **release binaries** to the GitHub release -
-`stackctl-linux-amd64`, `stackctl-linux-arm64` and `stackctl-windows-amd64`
-(each stamped with the version) plus a `checksums.txt` - so hosts without a
-container registry pull can download them from the release page directly.
-
-### Compose version
-
-stackctl invokes the compose CLI as
-`<compose_binary> compose -p <project> ps|start|stop|restart` and — for
-stacks with a configured directory —
-`<compose_binary> compose -p <project> -f <dir>/<file> pull|up -d|config`.
-This project addressing without a compose file was verified with **Compose
-v5.8.0** (bundle that ships with the `docker:cli` image). Status output
-parsers accept both the line-delimited JSON objects used by older releases
-and the single JSON array form, so both Compose output styles work. `pull`
-and `up` require the compose file (label-based address alone is not enough);
-they were verified to resolve `.env` from the file's directory, matching
-host-side behavior.
-
-## Pull, up and editing stack files
-
-Three actions exist besides `start`/`stop`/`restart`. All of them are bound
+Four actions exist besides `start`/`stop`/`restart`. All of them are bound
 to `stacks[].dir` and are only offered/accepted when a stack declares one:
 
 - **pull** — `docker compose -p <project> -f <file> pull`: fetches newer
@@ -232,6 +200,13 @@ to `stacks[].dir` and are only offered/accepted when a stack declares one:
 - **up** — `docker compose -p <project> -f <file> up -d`: recreates
   containers from the model on disk, applying image, compose and `.env`
   changes. This is the counterpart of `pull` — and of every edit.
+- **update** — `pull` and `up -d` in one click, **best effort**: the
+  recreation runs even when the pull failed or timed out (the newest images
+  that are already local are used, and compose recreates only what the model
+  changed). A pull-only failure is reported as a warning in the UI and the
+  audit log records `result: ok, reason: pull_failed`; a failed recreation
+  is an error like any other action. Both steps are bounded by
+  `docker.pull_timeout` each.
 - **edit** — permission for the editor page (`GET /stacks/<stack>/edit`) and
   its file API: read and replace the main compose file and `.env`
 
@@ -276,7 +251,23 @@ Without a configured `dir`, a stack keeps the label-based behavior: only
 would fail with "no configuration file provided" because compose cannot
 address a project without its model.
 
+## Compose compatibility
+
+stackctl invokes the compose CLI as
+`<compose_binary> compose -p <project> ps|start|stop|restart` and — for
+stacks with a configured directory —
+`<compose_binary> compose -p <project> -f <dir>/<file> pull|up -d|config`.
+Project addressing without a compose file was verified with **Compose
+v5.8.0** (the bundle that ships with the `docker:cli` image); pull and up
+resolve `.env` from the model's directory, matching host-side behavior. The
+status parser accepts both the line-delimited JSON objects used by older
+releases and the single JSON array form, so both Compose output styles work.
+
 ## HTTP interface
+
+The UI is only a convenience; everything it does goes through the same
+server-rendered pages and JSON API listed here, so you can script or audit
+against them directly.
 
 | Method and path | Auth | Purpose |
 | --- | --- | --- |
@@ -285,7 +276,7 @@ address a project without its model.
 | `GET /auth/callback` | none | Validates and creates the session |
 | `POST /logout` | session + CSRF | Clears the session, redirects to `/` |
 | `GET /api/stacks` | session | JSON list of visible stacks with state and allowed actions |
-| `POST /api/stacks/{name}/{action}` | session + CSRF | Performs `start`\|`stop`\|`restart`\|`pull`\|`up`, returns the new status |
+| `POST /api/stacks/{name}/{action}` | session + CSRF | Performs `start`\|`stop`\|`restart`\|`pull`\|`up`\|`update`, returns the new status |
 | `GET /api/stacks/{name}/files` | session + `edit` | Which files are editable (or none, without `dir`) |
 | `GET /api/stacks/{name}/files/{kind}` | session + `edit` | One file's content + sha256 (`kind` = `compose` or `env`) |
 | `PUT /api/stacks/{name}/files/{kind}` | session + CSRF + `edit` | Validates, backs up and atomically replaces the file |
@@ -299,28 +290,26 @@ configuration; unknown or invisible stacks return `404`, disallowed actions
 compose model `400`, a concurrently running action `409`, docker failures
 `502` and timeouts `504` — command output is never returned to clients. File
 saves answer `422` when compose rejects the model, `409` on a stale hash, and
-`413`/`400` for oversized or non-text content.
+`413`/`400` for oversized or non-text content. An `update` whose pull step
+failed answers `200` with a `warning` field on the status object.
 
-Audit log examples (stdout, JSON):
+## Audit log
+
+Every action attempt, file operation, login/logout, denial and config reload
+produces one structured JSON line on stdout:
 
 ```json
 {"time":"...","level":"INFO","msg":"stack_action","user":"bob","groups":["family"],"stack":"media","project":"media","action":"restart","result":"ok","duration_ms":2310,"remote_ip":"203.0.113.5"}
-{"time":"...","level":"INFO","msg":"stack_action","user":"alice","groups":["editors"],"stack":"media","project":"media","action":"pull","result":"ok","duration_ms":41200,"remote_ip":"203.0.113.5"}
+{"time":"...","level":"INFO","msg":"stack_action","user":"alice","groups":["editors"],"stack":"media","project":"media","action":"update","result":"ok","duration_ms":61200,"remote_ip":"203.0.113.5","reason":"pull_failed"}
 {"time":"...","level":"INFO","msg":"file_op","user":"alice","groups":["editors"],"stack":"media","file":"compose","op":"save","result":"ok","duration_ms":640,"remote_ip":"203.0.113.5"}
 ```
 
-File saves additionally log `result:"error"` with reasons like
-`compose_validation`, `conflict` or `not_regular_file`.
+File saves can also log `result:"error"` with reasons like
+`compose_validation`, `conflict` or `not_regular_file`; a `result:"ok"` with a
+`reason` means a partially successful action (a best-effort `update` whose
+image pull failed).
 
 ## Development
 
-```sh
-go test -race ./...      # all packages
-go vet ./...
-staticcheck ./...
-```
-
-For manual testing without a real identity provider, a mock OIDC provider can
-be stood up next to it (e.g. `github.com/oauth2-proxy/mockoidc`): point
-`oidc.issuer` at the mock, set `cookie_secure: false` and log in through the
-UI. The tests already run this flow against a mock provider.
+To build stackctl from source, hack on it or cut a release, see
+[DEVELOPMENT.md](DEVELOPMENT.md).

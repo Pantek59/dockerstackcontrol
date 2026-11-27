@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -300,14 +299,7 @@ func (r *ExecRunner) run(ctx context.Context, args []string, timeout time.Durati
 
 	cmd := exec.CommandContext(ctx, r.bin, args...)
 	cmd.Env = r.env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			// Kill the whole process group (negative pid), not just the CLI.
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+	configureProcess(cmd)
 	cmd.WaitDelay = 2 * time.Second
 
 	var outBuf, errBuf bytes.Buffer

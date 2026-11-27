@@ -295,7 +295,7 @@ func hashOf(text string) string {
 func openFile(path string) (*os.File, os.FileInfo, error) {
 	// Linux-only: the codebase already relies on Linux syscalls (process
 	// groups, docker.sock), and O_NOFOLLOW is the symlink guard here.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openGuarded(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, nil, mapOpenErr(err)
 	}
@@ -313,12 +313,12 @@ func openFile(path string) (*os.File, os.FileInfo, error) {
 
 // mapOpenErr translates open errors to the sentinel errors.
 func mapOpenErr(err error) error {
+	// O_NOFOLLOW refuses a trailing symlink (ELOOP on Unix); guard-specific
+	// errors map to the "not a regular file" sentinel.
+	err = mapGuardedErr(err)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return ErrNotFound
-	case errors.Is(err, syscall.ELOOP):
-		// Trailing symlink: O_NOFOLLOW refuses to open it.
-		return ErrNotRegular
 	case errors.Is(err, syscall.EISDIR):
 		return ErrNotRegular
 	default:
@@ -460,14 +460,14 @@ func saveMode(path string, current []byte) os.FileMode {
 func writeTemp(path string, content []byte, mode os.FileMode) (string, error) {
 	tmpPath := filepath.Join(filepath.Dir(path), tempPrefix+filepath.Base(path))
 	// O_EXCL refuses an existing temp (never clobber, never follow symlinks
-	// thanks to O_NOFOLLOW on the leaf).
-	fd, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
+	// thanks to the O_NOFOLLOW guard on the leaf).
+	fd, err := openGuarded(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			// A crashed earlier run left its temp behind: clean and retry
 			// once (the temp is exclusively ours by name).
 			_ = os.Remove(tmpPath)
-			fd, err = os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
+			fd, err = openGuarded(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 		}
 		if err != nil {
 			return "", mapOpenErr(err)

@@ -20,6 +20,11 @@ import (
 	"github.com/Pantek59/dockerstackcontrol/internal/server"
 )
 
+// version is stamped at build time with -ldflags "-X main.version=vX.Y.Z"
+// (CI passes the release tag; Docker builds pass a build arg). Local bare
+// `go build`s report "dev".
+var version = "dev"
+
 // configFlag overrides the STACKCTL_CONFIG environment variable, which itself
 // overrides the default path.
 var configFlag = flag.String("config", "", "path to configuration file (default: $STACKCTL_CONFIG, then "+config.DefaultConfigPath+")")
@@ -98,7 +103,7 @@ func run(logger *slog.Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", cfg.Server.Listen, "external_url", cfg.Server.ExternalURL)
+		logger.Info("listening", "version", version, "addr", cfg.Server.Listen, "external_url", cfg.Server.ExternalURL)
 		errCh <- httpServer.ListenAndServe()
 	}()
 

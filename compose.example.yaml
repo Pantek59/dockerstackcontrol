@@ -8,13 +8,18 @@
 #        STACKCTL_HASH_KEY=<openssl rand -base64 32>
 #        STACKCTL_BLOCK_KEY=<openssl rand -base64 32>
 #
+# The image is pre-built by CI on release tags and pulled from GHCR, so the
+# server needs no Go toolchain. Only the docker CLI + Compose plugin must be
+# present on the host (they come with the docker engine on most installs).
+#
 # The service is meant to run behind a reverse proxy that terminates TLS and
 # points https://<your-domain>/ at port 8080 (see README).
 
 services:
   stackctl:
-    build: .
-    image: stackctl:latest
+    # Pin the version deliberately (published by CI from release tags).
+    # Bump, audit the release notes, and roll back by restoring this line.
+    image: ghcr.io/pantek59/dockerstackcontrol:1.0.0
     container_name: stackctl
     restart: unless-stopped
     ports:
@@ -26,14 +31,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Configuration, loaded fresh again on SIGHUP (docker compose kill -s HUP stackctl).
       - ./config.yaml:/etc/stackctl/config.yaml:ro
-      #
-      # Stack directories for the file-backed actions (pull, up, edit).
-      # IMPORTANT: mount each host path at the SAME in-container path.
-      # Docker resolves relative bind mounts inside a compose file against
-      # the daemon's view of the host, so a mount rewrite like
-      # /srv:/data would produce containers with broken paths once files
-      # are edited and applied with "up".
-      # - /srv:/srv
     environment:
       STACKCTL_OIDC_SECRET: ${STACKCTL_OIDC_SECRET}
       STACKCTL_HASH_KEY: ${STACKCTL_HASH_KEY}

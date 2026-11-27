@@ -4,7 +4,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/stackctl ./cmd/stackctl
+
+# VERSION is stamped into the binary; CI passes the release tag (vX.Y.Z).
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/stackctl ./cmd/stackctl
 
 # Runtime: a small image that already contains the Docker CLI and the Compose
 # plugin, which stackctl shells out to (see README for the minimum version).

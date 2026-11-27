@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -43,6 +44,10 @@ type stackJSON struct {
 	State          string           `json:"state"`
 	Services       []docker.Service `json:"services"`
 	AllowedActions []string         `json:"allowed_actions"`
+	// Warning carries a sanitized failure summary for an action that
+	// nevertheless finished its essential work (a best-effort update whose
+	// pull step failed). Listings never fill it.
+	Warning string `json:"warning,omitempty"`
 }
 
 // stacksResponse is the GET /api/stacks body.
@@ -216,21 +221,42 @@ func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
 			writeJSONError(rw, http.StatusBadRequest, "stack has no usable compose file (is \"dir\" configured?)")
 			return
 		}
-		spec.Dir, spec.Compose = stack.Dir, composeFile
+		// Spec.Compose must be the plain file name inside the stack
+		// directory (composeFilePath joins and re-validates it); the
+		// resolver returns the joined path.
+		spec.Dir, spec.Compose = stack.Dir, filepath.Base(composeFile)
 	}
 
 	start := time.Now()
 	err := s.runner.Do(r.Context(), spec, action)
 	duration := time.Since(start)
 
-	result, status := classifyDockerActionError(err)
-	s.audit.StackAction(user.Username, user.Groups, stack.Name, stack.Project, actionStr,
-		result, "", remoteIP, duration)
-	if err != nil {
+	// Best-effort updates can fail in the pull step alone; the stack was
+	// then still recreated from the newest locally available images. That is
+	// an overall success (HTTP 200) whose sanitized pull error travels to
+	// the client as a warning — a pull failure alone must not read as "the
+	// stack was not updated" — and the captured pull stderr stays in the
+	// server log for the operator.
+	var ue *docker.UpdateError
+	pullFailed := errors.As(err, &ue) && ue.UpErr == nil
+	if err != nil && !pullFailed {
+		result, status := classifyDockerActionError(err)
+		s.audit.StackAction(user.Username, user.Groups, stack.Name, stack.Project, actionStr,
+			result, "", remoteIP, duration)
 		// Sanitized: command output never reaches the client.
 		writeJSONError(rw, status, err.Error())
 		return
 	}
+
+	result, reason := "ok", ""
+	if pullFailed {
+		reason = "pull_failed"
+		s.logger.Warn("update: image pull failed, containers recreated anyway",
+			"stack", stack.Name, "project", stack.Project,
+			"detail", commandDetail(ue.PullErr))
+	}
+	s.audit.StackAction(user.Username, user.Groups, stack.Name, stack.Project, actionStr,
+		result, reason, remoteIP, duration)
 
 	// Report the stack's new status; failures here keep the action's success
 	// (HTTP 200) but degrade the state to "unknown".
@@ -240,6 +266,9 @@ func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
 		State:          docker.StateUnknown,
 		Services:       []docker.Service{},
 		AllowedActions: visibleAllowedActions(cfg, user, stack),
+	}
+	if pullFailed {
+		entry.Warning = ue.Error()
 	}
 	status2, serr := s.runner.Status(r.Context(), stack.Project)
 	if serr != nil {
@@ -252,10 +281,22 @@ func (s *Server) apiAction(rw http.ResponseWriter, r *http.Request) {
 	writeJSON(rw, http.StatusOK, entry)
 }
 
+// commandDetail extracts the operator-facing detail from a runner error:
+// the captured stderr when there is any, else the sanitized error text. For
+// server-side logs only, never for responses (same policy as the compose
+// validation in api_files.go).
+func commandDetail(err error) string {
+	var ce *docker.CommandError
+	if errors.As(err, &ce) && ce.Stderr != "" {
+		return truncateForLog(ce.Stderr, 1024)
+	}
+	return err.Error()
+}
+
 // actionRequiresFile mirrors docker's requiresFile without leaking the enum
 // into a public wrapper: the server knows which actions are file-backed.
 func actionRequiresFile(action docker.Action) bool {
-	return action == docker.ActionPull || action == docker.ActionUp
+	return action == docker.ActionPull || action == docker.ActionUp || action == docker.ActionUpdate
 }
 
 // composeFileFor resolves the absolute path of the stack's main compose

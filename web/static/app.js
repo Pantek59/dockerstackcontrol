@@ -6,7 +6,7 @@
  * Behaviour (per the spec):
  *   - fetch /api/stacks on load and every 5 seconds while the tab is visible;
  *   - one button per allowed action; disallowed actions are not rendered;
- *   - stop asks for confirmation;
+ *   - stop and update ask for confirmation;
  *   - while a request runs, the stack's buttons are disabled and show a
  *     spinner;
  *   - errors appear in a dismissible banner;
@@ -68,7 +68,11 @@
         showBanner((out.data && out.data.error) || "Failed to load stack status.", "error");
         return;
       }
-      hideBanner();
+      // A dismissible warning (e.g. a best-effort update whose pull step
+      // failed) survives refreshes; other banners are transient.
+      if (banner.dataset.kind !== "warn") {
+        hideBanner();
+      }
       render((out.data && out.data.stacks) || []);
     }).catch(function () {
       showBanner("Network error while fetching stack status.", "error");
@@ -173,6 +177,9 @@
     if (action === "stop" && !window.confirm('Stop stack "' + stackName + '"?')) {
       return;
     }
+    if (action === "update" && !window.confirm('Update stack "' + stackName + '"? New images will be pulled (best effort) and the containers recreated from the compose model.')) {
+      return;
+    }
     hideBanner();
     setBusy(stackName, true);
     var art = root.querySelector('article[data-stack="' + CSS.escape(stackName) + '"]');
@@ -200,6 +207,10 @@
         showBanner("The docker command timed out.", "error");
       } else if (!out.resp.ok) {
         showBanner((out.data && out.data.error) || "The docker command failed.", "error");
+      } else if (out.data && out.data.warning) {
+        // Best-effort update whose pull step failed: the stack was still
+        // recreated; the server sends the sanitized failure as a warning.
+        showBanner(out.data.warning, "warn");
       }
     }).catch(function () {
       showBanner("Network error while running the action.", "error");

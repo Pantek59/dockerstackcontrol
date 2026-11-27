@@ -70,10 +70,12 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	// pull_timeout bounds the slowest commands (pull, up -d), so the write
-	// timeout must at least cover that, not only command_timeout.
+	// pull_timeout bounds the slowest single commands (pull, up -d), so the
+	// write timeout must at least cover that, not only command_timeout. The
+	// update action runs pull and then up -d in one request, so its worst
+	// case is twice the pull timeout.
 	dockerTimeout := cfg.Server.CommandTimeout.Std()
-	if pull := cfg.Docker.PullTimeout.Std(); pull > dockerTimeout {
+	if pull := 2 * cfg.Docker.PullTimeout.Std(); pull > dockerTimeout {
 		dockerTimeout = pull
 	}
 	runner := docker.NewExecRunner(cfg.Docker.ComposeBinary,
@@ -85,8 +87,9 @@ func run(logger *slog.Logger) error {
 
 	httpServer := &http.Server{
 		Addr: cfg.Server.Listen,
-		// Write timeout must exceed the longest Docker command timeout, or
-		// the response of a slow restart or pull would be cut off.
+		// Write timeout must exceed the longest possible action, or the
+		// response of a slow restart, pull or (pull + up) update would be
+		// cut off.
 		WriteTimeout:      dockerTimeout + 30*time.Second,
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,

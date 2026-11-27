@@ -34,13 +34,14 @@ const (
 	ActionRestart Action = "restart"
 	ActionPull    Action = "pull"
 	ActionUp      Action = "up"
+	ActionUpdate  Action = "update"
 )
 
 // ParseAction converts a request string into an Action. Unknown strings are
 // rejected: they can never reach an argument list.
 func ParseAction(s string) (Action, bool) {
 	switch Action(s) {
-	case ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp:
+	case ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp, ActionUpdate:
 		return Action(s), true
 	default:
 		return "", false
@@ -48,9 +49,9 @@ func ParseAction(s string) (Action, bool) {
 }
 
 // requiresFile reports whether the action drives compose through a compose
-// model (pull, up) instead of the project's existing containers.
+// model (pull, up, update) instead of the project's existing containers.
 func (a Action) requiresFile() bool {
-	return a == ActionPull || a == ActionUp
+	return a == ActionPull || a == ActionUp || a == ActionUpdate
 }
 
 // Stack status derived from the services of a compose project.
@@ -97,11 +98,12 @@ type Runner interface {
 	// Status reports the current state of the compose project. It returns
 	// StateNotFound with a nil error when the project has no containers.
 	Status(ctx context.Context, project string) (StackStatus, error)
-	// Do performs the given action and returns once the command finished.
+	// Do performs the given action and returns once the command(s) finished.
 	// For the label-based actions (start, stop, restart) only spec.Project is
-	// used. The file-backed actions (pull, up) additionally require
+	// used. The file-backed actions (pull, up, update) additionally require
 	// spec.Dir (absolute stack directory) and spec.Compose (main compose
-	// file name inside it).
+	// file name inside it). update runs pull and then up -d, best effort; a
+	// pull-only failure comes back as *UpdateError with a nil UpErr.
 	Do(ctx context.Context, spec StackSpec, action Action) error
 	// Validate loads the compose model described by spec without touching
 	// the daemon (compose config --quiet): used to check an edited compose
@@ -231,10 +233,70 @@ func (r *ExecRunner) Do(ctx context.Context, spec StackSpec, action Action) erro
 	if err != nil {
 		return err
 	}
+	if action == ActionUpdate {
+		return r.update(ctx, spec.Project, file)
+	}
 	if _, _, err := r.run(ctx, composeFileActionArgs(spec.Project, file, action), r.pullTimeout); err != nil {
 		return err
 	}
 	return nil
+}
+
+// UpdateError carries the outcome of an update (pull, then up -d, best
+// effort). At least one field is non-nil when it is returned. Error()
+// deliberately never contains command output — the same guarantee as
+// [CommandError] — so this text is safe to include in API responses; stderr
+// stays server-side.
+type UpdateError struct {
+	// PullErr is non-nil when the image pull failed or timed out.
+	PullErr error
+	// UpErr is non-nil when the container recreation failed or timed out.
+	UpErr error
+}
+
+func (e *UpdateError) Error() string {
+	var parts []string
+	if e.PullErr != nil {
+		parts = append(parts, "image pull failed: "+e.PullErr.Error())
+	}
+	if e.UpErr != nil {
+		parts = append(parts, "container recreation failed: "+e.UpErr.Error())
+	}
+	return strings.Join(parts, "; ")
+}
+
+// Unwrap yields the failing step errors (up first) so errors.Is finds
+// ErrTimeout through the chain.
+func (e *UpdateError) Unwrap() []error {
+	out := make([]error, 0, 2)
+	if e.UpErr != nil {
+		out = append(out, e.UpErr)
+	}
+	if e.PullErr != nil {
+		out = append(out, e.PullErr)
+	}
+	return out
+}
+
+// update runs the two-step "newest images, then recreate" sequence, best
+// effort: a failed pull must not block the recreation, because the images
+// that did arrive — or were already local — remain the newest applicable
+// ones, and compose recreates only what the model changed. Whichever steps
+// failed are reported in the returned *UpdateError; the caller decides
+// whether a pull-only failure is an overall failure. Each step is bounded by
+// its own pullTimeout.
+func (r *ExecRunner) update(ctx context.Context, project, composeFile string) error {
+	ue := &UpdateError{}
+	if _, _, err := r.run(ctx, composeFileActionArgs(project, composeFile, ActionPull), r.pullTimeout); err != nil {
+		ue.PullErr = err
+	}
+	if _, _, err := r.run(ctx, composeFileActionArgs(project, composeFile, ActionUp), r.pullTimeout); err != nil {
+		ue.UpErr = err
+	}
+	if ue.PullErr == nil && ue.UpErr == nil {
+		return nil
+	}
+	return ue
 }
 
 // Validate implements Runner. It runs compose config --quiet, which parses

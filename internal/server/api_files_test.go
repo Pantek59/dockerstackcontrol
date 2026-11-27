@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -325,15 +326,18 @@ func TestPullAndUpActionsRunThroughStackSpec(t *testing.T) {
 		requireStatus(t, rec, http.StatusOK)
 	}
 
+	// spec.Compose reaches the runner as the plain file name (the ExecRunner
+	// contract; it joins and re-validates it against spec.Dir itself).
+	name := filepath.Base(compose)
 	calls := h.runner.callsWith("do:media/")
 	if len(calls) != 2 {
 		t.Fatalf("do calls = %v, want pull and up", calls)
 	}
-	if !strings.HasPrefix(calls[0], "do:media/pull@") || !strings.Contains(calls[0], compose) {
-		t.Errorf("pull call = %q, want the -f path", calls[0])
+	if !strings.HasPrefix(calls[0], "do:media/pull@") || !strings.HasSuffix(calls[0], "@"+name) {
+		t.Errorf("pull call = %q, want the resolved compose file name %q", calls[0], name)
 	}
-	if !strings.HasPrefix(calls[1], "do:media/up@") || !strings.Contains(calls[1], compose) {
-		t.Errorf("up call = %q, want the -f path", calls[1])
+	if !strings.HasPrefix(calls[1], "do:media/up@") || !strings.HasSuffix(calls[1], "@"+name) {
+		t.Errorf("up call = %q, want the resolved compose file name %q", calls[1], name)
 	}
 }
 

@@ -10,6 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -404,6 +407,94 @@ func TestActionInvisibleAndUnknownStackReturn404NoCall(t *testing.T) {
 
 	if calls := h.runner.callsWith("do:"); len(calls) != 0 {
 		t.Errorf("executed docker calls: %v", calls)
+	}
+}
+
+// updateStackConfig grants "update" on all stacks; dir optionally points the
+// stacks at a directory that must contain model compose.
+func updateStackConfig(dir string) func(*config.Config) {
+	return func(c *config.Config) {
+		c.Stacks[0].Dir = dir
+		c.Rules[0].Actions = append(c.Rules[0].Actions, "update")
+	}
+}
+
+func TestUpdateActionRunsAsOneRequest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, updateStackConfig(dir))
+	cookie, csrf := h.sessionFor(t, "alice", []string{"admins"})
+	rec := h.do(withSession(post(t, base+"/api/stacks/media/update", nil), cookie, csrf, "http://example.com"))
+	requireStatus(t, rec, http.StatusOK)
+
+	// The file-backed update reached the runner with the resolved model.
+	calls := h.runner.callsWith("do:")
+	if len(calls) != 1 || calls[0] != "do:media/update@docker-compose.yml" {
+		t.Fatalf("executed docker calls = %v, want exactly [do:media/update@docker-compose.yml]", calls)
+	}
+
+	var entry stackJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &entry); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, rec.Body.String())
+	}
+	if entry.Warning != "" {
+		t.Errorf("warning = %q, want empty on success", entry.Warning)
+	}
+	if got, want := entry.AllowedActions, []string{"start", "stop", "restart", "pull", "up", "update", "edit"}; !slices.Equal(got, want) {
+		t.Errorf("allowed_actions = %v, want %v (dir is now set)", got, want)
+	}
+}
+
+func TestUpdateDeniedWithoutGrantOrWithoutDir(t *testing.T) {
+	// bob holds "restart" only; even with a dir he gets 403.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, func(c *config.Config) { c.Stacks[0].Dir = dir })
+	cookie, csrf := h.sessionFor(t, "bob", []string{"family"})
+	rec := h.do(withSession(post(t, base+"/api/stacks/media/update", nil), cookie, csrf, "http://example.com"))
+	requireStatus(t, rec, http.StatusForbidden)
+	if calls := h.runner.callsWith("do:"); len(calls) != 0 {
+		t.Errorf("executed docker calls: %v — nothing must run without permission", calls)
+	}
+
+	// alice holds update, but the stack declares no directory: 400 after the
+	// permission checks, still without touching the daemon.
+	h2 := newHarness(t, updateStackConfig(""))
+	cookie2, csrf2 := h2.sessionFor(t, "alice", []string{"admins"})
+	rec2 := h2.do(withSession(post(t, base+"/api/stacks/media/update", nil), cookie2, csrf2, "http://example.com"))
+	requireStatus(t, rec2, http.StatusBadRequest)
+	if calls := h2.runner.callsWith("do:"); len(calls) != 0 {
+		t.Errorf("executed docker calls: %v — the dir guard runs before any command", calls)
+	}
+}
+
+func TestUpdatePullFailureSurfacesAsWarning(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, updateStackConfig(dir))
+	h.runner.doErr["media/update@docker-compose.yml"] = &docker.UpdateError{
+		PullErr: &docker.CommandError{Command: "docker compose -p media -f compose pull", ExitCode: 1, Stderr: "SECRET-registry-unreachable"},
+	}
+	cookie, csrf := h.sessionFor(t, "alice", []string{"admins"})
+	rec := h.do(withSession(post(t, base+"/api/stacks/media/update", nil), cookie, csrf, "http://example.com"))
+	// The recreation step ran and succeeded: overall success with a warning.
+	requireStatus(t, rec, http.StatusOK)
+
+	var entry stackJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &entry); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, rec.Body.String())
+	}
+	if !strings.Contains(entry.Warning, "image pull failed") {
+		t.Errorf("warning = %q, want the sanitized pull failure", entry.Warning)
+	}
+	if strings.Contains(entry.Warning, "SECRET") || strings.Contains(entry.Warning, "registry-unreachable") {
+		t.Errorf("warning leaks command stderr: %q", entry.Warning)
 	}
 }
 

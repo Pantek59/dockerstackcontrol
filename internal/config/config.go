@@ -43,31 +43,33 @@ const (
 // Action names as used in rule declarations.
 //
 // start/stop/restart operate on the existing containers of a project and
-// never need a compose file. pull/up recreate from a compose model and edit
-// touches the stack files, so all three require the stack to declare "dir".
+// never need a compose file. pull/up/update recreate from a compose model and
+// edit touches the stack files, so all of these require the stack to declare
+// "dir".
 const (
 	ActionStart   = "start"
 	ActionStop    = "stop"
 	ActionRestart = "restart"
 	ActionPull    = "pull"
 	ActionUp      = "up"
+	ActionUpdate  = "update"
 	ActionEdit    = "edit"
 )
 
 // ActionRequiresFiles reports whether an action needs the stack's compose
 // model on disk (config.Stack.Dir).
 func ActionRequiresFiles(action string) bool {
-	return action == ActionPull || action == ActionUp || action == ActionEdit
+	return action == ActionPull || action == ActionUp || action == ActionUpdate || action == ActionEdit
 }
 
 // CanonicalActions is the canonical, deterministic order used wherever a list
 // of a user's allowed actions is rendered or compared.
-var CanonicalActions = []string{ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp, ActionEdit}
+var CanonicalActions = []string{ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp, ActionUpdate, ActionEdit}
 
 // ValidAction reports whether s is one of the known action names.
 func ValidAction(s string) bool {
 	switch s {
-	case ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp, ActionEdit:
+	case ActionStart, ActionStop, ActionRestart, ActionPull, ActionUp, ActionUpdate, ActionEdit:
 		return true
 	}
 	return false

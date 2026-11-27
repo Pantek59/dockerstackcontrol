@@ -51,13 +51,16 @@ func TestProjectNameGuard(t *testing.T) {
 }
 
 func TestParseAction(t *testing.T) {
-	for s, want := range map[string]Action{"start": ActionStart, "stop": ActionStop, "restart": ActionRestart} {
+	for s, want := range map[string]Action{
+		"start": ActionStart, "stop": ActionStop, "restart": ActionRestart,
+		"pull": ActionPull, "up": ActionUp, "update": ActionUpdate,
+	} {
 		got, ok := ParseAction(s)
 		if !ok || got != want {
 			t.Errorf("ParseAction(%q) = %v, %v; want %v, true", s, got, ok, want)
 		}
 	}
-	for _, s := range []string{"", "START", "kill", "logs", "start ", "format"} {
+	for _, s := range []string{"", "START", "kill", "logs", "start ", "format", "updates"} {
 		if _, ok := ParseAction(s); ok {
 			t.Errorf("ParseAction(%q) unexpectedly accepted", s)
 		}
@@ -426,9 +429,160 @@ func TestDoFileBackedActionsRequireFileAndCleanDir(t *testing.T) {
 	if err := r.Do(context.Background(), StackSpec{Project: "media", Dir: "/x", Compose: "../escape.yml"}, ActionPull); err == nil {
 		t.Error("Do(pull) with traversing file name accepted")
 	}
+	// The update sequence meets the same guards as the other file-backed
+	// actions, before any command runs.
+	if err := r.Do(context.Background(), StackSpec{Project: "media"}, ActionUpdate); err == nil {
+		t.Error("Do(update) without dir accepted")
+	}
+	if err := r.Do(context.Background(), StackSpec{Project: "media", Dir: "/stacks"}, ActionUpdate); err == nil {
+		t.Error("Do(update) without compose file accepted")
+	}
+	if err := r.Do(context.Background(), StackSpec{Project: "media", Dir: "/x", Compose: "../escape.yml"}, ActionUpdate); err == nil {
+		t.Error("Do(update) with traversing file name accepted")
+	}
 	// Label-based actions must not be affected by the file requirement.
 	if err := r.Do(context.Background(), StackSpec{Project: "media"}, ActionRestart); err == nil {
 		_ = err // /bin/false exits 1, so a CommandError is expected, not a guard error
+	}
+}
+
+// argsLogLines reads back the joined command lines an argsRecordingCompose
+// binary recorded (one "CMD: <args>" line per invocation).
+func argsLogLines(t *testing.T, argsLog string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("fake binary recorded nothing: %v", err)
+	}
+	var lines []string
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if line != "" {
+			lines = append(lines, strings.TrimPrefix(line, "CMD: "))
+		}
+	}
+	return lines
+}
+
+func TestDoUpdateRunsPullThenUp(t *testing.T) {
+	script, argsLog := argsRecordingCompose(t)
+	r := &ExecRunner{bin: script, env: minimalEnv(), timeout: time.Second, pullTimeout: time.Second}
+
+	stackDir := t.TempDir()
+	compose := filepath.Join(stackDir, "docker-compose.yml")
+	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := StackSpec{Project: "media", Dir: stackDir, Compose: "docker-compose.yml"}
+	if err := r.Do(context.Background(), spec, ActionUpdate); err != nil {
+		t.Fatalf("Do(update) error = %v", err)
+	}
+
+	lines := argsLogLines(t, argsLog)
+	want := []string{
+		"compose -p media -f " + compose + " pull",
+		"compose -p media -f " + compose + " up -d",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("recorded commands = %v", lines)
+	}
+	for i, w := range want {
+		if lines[i] != w {
+			t.Errorf("command %d = %q, want %q", i, lines[i], w)
+		}
+	}
+}
+
+// pullFailingCompose is a fake compose binary that appends its command line
+// to argsLog and exits 1 (with stderr output) exactly for pull invocations.
+func pullFailingCompose(t *testing.T, argsLog string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "pullfail-docker")
+	content := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$arg\" = \"pull\" ]; then\n" +
+		"    printf '%s\\n' \"CMD: $*\" >> \"" + argsLog + "\"\n" +
+		"    echo 'registry unreachable' >&2\n" +
+		"    exit 1\n" +
+		"  fi\n" +
+		"done\n" +
+		"printf '%s\\n' \"CMD: $*\" >> \"" + argsLog + "\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func TestDoUpdateIsBestEffortWhenPullFails(t *testing.T) {
+	argsLog := filepath.Join(t.TempDir(), "args")
+	r := &ExecRunner{bin: pullFailingCompose(t, argsLog), env: minimalEnv(), timeout: time.Second, pullTimeout: time.Second}
+
+	stackDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stackDir, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := r.Do(context.Background(), StackSpec{Project: "media", Dir: stackDir, Compose: "docker-compose.yml"}, ActionUpdate)
+	if err == nil {
+		t.Fatal("Do(update) succeeded although the pull failed")
+	}
+	ue, ok := err.(*UpdateError)
+	if !ok {
+		t.Fatalf("Do(update) error = %T %v, want *UpdateError", err, err)
+	}
+	if ue.PullErr == nil {
+		t.Error("UpdateError.PullErr = nil, want the pull failure")
+	}
+	if ue.UpErr != nil {
+		t.Errorf("UpdateError.UpErr = %v, want nil (up ran after the failed pull)", ue.UpErr)
+	}
+	// The pull error text must stay sanitized; the recreation must have run.
+	if strings.Contains(err.Error(), "registry unreachable") {
+		t.Errorf("Error() leaks stderr: %q", err.Error())
+	}
+	lines := argsLogLines(t, argsLog)
+	if len(lines) != 2 || !strings.Contains(lines[0], " pull") || !strings.Contains(lines[1], "up -d") {
+		t.Errorf("recorded commands = %v, want pull then up -d despite the failed pull", lines)
+	}
+}
+
+func TestDoUpdateReportsBothFailures(t *testing.T) {
+	r := &ExecRunner{bin: "/bin/false", env: minimalEnv(), timeout: time.Second, pullTimeout: time.Second}
+	err := r.Do(context.Background(), StackSpec{Project: "media", Dir: "/x", Compose: "y.yml"}, ActionUpdate)
+	if err == nil {
+		t.Fatal("Do(update) succeeded although both steps failed")
+	}
+	ue, ok := err.(*UpdateError)
+	if !ok {
+		t.Fatalf("Do(update) error = %T %v, want *UpdateError", err, err)
+	}
+	if ue.PullErr == nil || ue.UpErr == nil {
+		t.Errorf("UpdateError = %+v, want both step errors set", ue)
+	}
+	if !strings.Contains(err.Error(), "image pull failed") || !strings.Contains(err.Error(), "container recreation failed") {
+		t.Errorf("Error() = %q, want both step summaries", err.Error())
+	}
+}
+
+func TestUpdateUsesPullTimeoutForEachStep(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "slow-docker")
+	content := "#!/bin/sh\nsleep 5\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// timeout stays long enough to never fire; each update step must be cut
+	// off at pullTimeout.
+	r := &ExecRunner{bin: script, env: minimalEnv(), timeout: 2 * time.Second, pullTimeout: 80 * time.Millisecond}
+	start := time.Now()
+	err := r.Do(context.Background(), StackSpec{Project: "slow", Dir: "/x", Compose: "y.yml"}, ActionUpdate)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Do(update) error = %v, want ErrTimeout through the step errors", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("update took %v: pullTimeout was not honoured per step", elapsed)
+	}
+	ue, ok := err.(*UpdateError)
+	if !ok || ue.PullErr == nil || ue.UpErr == nil {
+		t.Fatalf("error = %T %+v, want *UpdateError with both steps timing out", err, ue)
 	}
 }
 

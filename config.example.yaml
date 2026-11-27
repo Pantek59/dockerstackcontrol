@@ -54,4 +54,4 @@ rules:
   - subjects:
       groups: ["editors"]
     stacks: ["nextcloud"]
-    actions: ["pull", "up", "edit"]       # file-backed; requires stacks[].dir
+    actions: ["pull", "up", "update", "edit"] # file-backed; requires stacks[].dir

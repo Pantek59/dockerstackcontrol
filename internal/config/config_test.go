@@ -266,7 +266,7 @@ func TestParseStackDirAndFileSettings(t *testing.T) {
 	// New action names are accepted in rules.
 	cfg := strings.NewReplacer(
 		`actions: ["start", "stop", "restart"]`,
-		`actions: ["start", "stop", "restart", "pull", "up", "edit"]`,
+		`actions: ["start", "stop", "restart", "pull", "up", "update", "edit"]`,
 	).Replace(raw)
 	if _, err := Parse([]byte(cfg)); err != nil {
 		t.Fatalf("Parse(new actions) error = %v", err)
@@ -279,10 +279,10 @@ func TestActionHelpers(t *testing.T) {
 			t.Errorf("ValidAction(%q) = false", a)
 		}
 	}
-	if len(CanonicalActions) != 6 {
-		t.Errorf("CanonicalActions = %v, want 6 entries", CanonicalActions)
+	if len(CanonicalActions) != 7 {
+		t.Errorf("CanonicalActions = %v, want 7 entries", CanonicalActions)
 	}
-	for _, a := range []string{"pull", "up", "edit"} {
+	for _, a := range []string{"pull", "up", "update", "edit"} {
 		if !ActionRequiresFiles(a) {
 			t.Errorf("ActionRequiresFiles(%q) = false", a)
 		}
